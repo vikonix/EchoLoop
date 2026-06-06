@@ -1,69 +1,207 @@
+"""Pronunciation analysis core for EchoLoop.
+
+Adapted from OpenPronounce (https://github.com/Halleck45/OpenPronounce), MIT License.
+The acoustic / phoneme comparison logic is reused as a library; the original web
+front-end and built-in TTS were dropped. In EchoLoop the reference audio is produced
+by the existing Kokoro TTS and passed into ``analyze`` as a NumPy array, so this module
+never synthesizes speech itself and never touches the GUI.
+
+Public API:
+    load_models()  -- load Wav2Vec2 weights once (call at mode startup, in a thread).
+    warm_up()      -- run a dummy pass to remove first-call latency (mirrors stt/tts).
+    analyze(...)   -- single entry point returning a PronunciationResult.
+
+Design notes:
+    * Models load lazily on first use; ``load_models`` only makes that explicit so the
+      heavy download/initialisation can happen in a background daemon thread, matching
+      the warm-up pattern in ``stt.py`` / ``tts.py``.
+    * Device follows ``config.DEVICE``; it can be overridden with an optional
+      ``config.WAV2VEC2_DEVICE`` value without editing this file.
+    * Wav2Vec2 needs 16 kHz mono audio. User audio already arrives at 16 kHz from the
+      recording path; the Kokoro reference is 24 kHz, so it is resampled here.
+"""
+
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 import numpy as np
-import torchaudio
 import torch
-import audio
+import librosa
+import Levenshtein
 from fastdtw import fastdtw
 from scipy.spatial.distance import euclidean
+from sklearn.preprocessing import MinMaxScaler
 from transformers import Wav2Vec2Processor, Wav2Vec2Model, Wav2Vec2ForCTC
 from phonemizer import phonemize
-import Levenshtein
-import re
-import librosa
-import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-import warnings
+
+# Allow autonomous use (e.g. running the test directly from inside pronounce/):
+# make the project root importable so ``import config`` resolves.
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+import config
 
 
-# Load Wav2Vec2
-MODEL_NAME = "facebook/wav2vec2-large-960h"
-processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME)
-model = Wav2Vec2Model.from_pretrained(MODEL_NAME)
-model.eval()
+# =====================================================================
+# Configuration (read from config.py with safe fallbacks so this module
+# stays usable even before config.py gains pronunciation-specific keys)
+# =====================================================================
+# Wav2Vec2 expects strictly 16 kHz mono input.
+TARGET_SAMPLE_RATE = 16_000
+# Kokoro synthesises at 24 kHz; used as the default reference sample rate.
+KOKORO_SAMPLE_RATE = 24_000
 
-# for transcribing
-#MODEL_NAME = "jonatasgrosman/wav2vec2-large-xlsr-53-english"
-modelCTC = Wav2Vec2ForCTC.from_pretrained(MODEL_NAME)
-modelCTC.eval()
+MODEL_NAME = getattr(config, "WAV2VEC2_MODEL_NAME", "facebook/wav2vec2-large-960h")
+# Default device follows config.DEVICE (cuda/cpu); overridable via config.WAV2VEC2_DEVICE.
+DEVICE = getattr(config, "WAV2VEC2_DEVICE", config.DEVICE)
+# Score (0-100) at or above which a repetition is considered acceptable.
+SCORE_THRESHOLD = getattr(config, "PRONUNCE_SCORE_THRESHOLD", 70.0)
+
+# Lazily-initialised model singletons (loaded once, reused for every analysis).
+_processor: Optional[Wav2Vec2Processor] = None
+_model: Optional[Wav2Vec2Model] = None          # embeddings (acoustic similarity)
+_model_ctc: Optional[Wav2Vec2ForCTC] = None     # transcription (what was recognised)
 
 
-def extract_embeddings(audio_waveform, sampling_rate=16000):
+# =====================================================================
+# Result type (the module's contract with the GUI layer)
+# =====================================================================
+@dataclass
+class PronunciationResult:
+    """Outcome of one pronunciation comparison.
+
+    The four fields required by the spec are ``score``, ``word_errors``,
+    ``prosody`` and ``transcription``; the rest are extras useful for richer
+    feedback (e.g. plotting contours) and are safe for the GUI to ignore.
     """
-    Extract raw Wav2Vec2 embeddings for a given audio input.
+
+    score: float                                  # 0-100 overall pronunciation score
+    word_errors: List[Dict[str, Any]]             # per-word expected/actual phonemes
+    prosody: Dict[str, List[float]]               # {"f0": [...], "energy": [...]}
+    transcription: str                            # what the ASR recognised
+    passed: bool = False                          # score >= SCORE_THRESHOLD
+    feedback: str = ""                            # human-readable summary
+    acoustic_distance: int = 0                    # Wav2Vec2-embedding DTW distance
+    words_with_errors: List[str] = field(default_factory=list)
+    expected_phonemes: List[str] = field(default_factory=list)
+    transcribed_phonemes: List[str] = field(default_factory=list)
+
+
+# =====================================================================
+# Model lifecycle
+# =====================================================================
+def load_models() -> None:
+    """Load Wav2Vec2 weights into memory once. Safe to call repeatedly.
+
+    Heavy (~1.2 GB download on first run); call from a background daemon thread
+    at mode startup so the GUI stays responsive.
     """
-    # Ensure audio is float32 and squeeze unnecessary dimensions
-    #audio_waveform = audio_waveform.squeeze().float()
+    global _processor, _model, _model_ctc
+    if _model is not None and _model_ctc is not None and _processor is not None:
+        return
 
-    # Transform audio into input for Wav2Vec2
-    inputs = processor(audio_waveform, sampling_rate=sampling_rate, return_tensors="pt", padding=True)
+    _processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME)
 
-    # Check shape before sending to model
+    _model = Wav2Vec2Model.from_pretrained(MODEL_NAME).to(DEVICE)
+    _model.eval()
+
+    _model_ctc = Wav2Vec2ForCTC.from_pretrained(MODEL_NAME).to(DEVICE)
+    _model_ctc.eval()
+
+
+def warm_up() -> None:
+    """Run a short dummy pass through both models to remove first-call latency."""
+    load_models()
+    dummy = np.zeros(TARGET_SAMPLE_RATE // 2, dtype=np.float32)  # 0.5 s of silence
+    extract_embeddings(dummy)
+    transcribe(dummy)
+
+
+def _ensure_loaded() -> None:
+    """Guarantee models are available before inference."""
+    if _model is None or _model_ctc is None or _processor is None:
+        load_models()
+
+
+# =====================================================================
+# Audio preparation
+# =====================================================================
+def _prepare_waveform(waveform: np.ndarray, orig_sr: int) -> np.ndarray:
+    """Return a 1-D float32 mono waveform resampled to TARGET_SAMPLE_RATE."""
+    wav = np.asarray(waveform, dtype=np.float32)
+
+    # Down-mix to mono. torchaudio gives [channels, samples] while soundfile gives
+    # [samples, channels], so average along whichever axis is smaller (the channels).
+    if wav.ndim > 1:
+        wav = wav.mean(axis=int(np.argmin(wav.shape)))
+
+    if orig_sr != TARGET_SAMPLE_RATE:
+        wav = librosa.resample(wav, orig_sr=orig_sr, target_sr=TARGET_SAMPLE_RATE)
+
+    return np.ascontiguousarray(wav, dtype=np.float32)
+
+
+# =====================================================================
+# Wav2Vec2 inference
+# =====================================================================
+def extract_embeddings(audio_waveform: np.ndarray,
+                       sampling_rate: int = TARGET_SAMPLE_RATE) -> np.ndarray:
+    """Extract raw Wav2Vec2 embeddings (time, features) for the given audio."""
+    _ensure_loaded()
+
+    inputs = _processor(audio_waveform, sampling_rate=sampling_rate,
+                        return_tensors="pt", padding=True)
+
     input_values = inputs.input_values
-    if len(input_values.shape) > 2:  # Remove unnecessary dimensions
+    if input_values.dim() > 2:  # drop any spurious leading dimension
         input_values = input_values.squeeze(0)
+    input_values = input_values.to(DEVICE)
 
     with torch.no_grad():
-        features = model(input_values).last_hidden_state  # (batch, time, features)
+        features = _model(input_values).last_hidden_state  # (batch, time, features)
 
-    return features.squeeze(0).numpy()
+    return features.squeeze(0).cpu().numpy()
 
 
-def get_phonemes_with_word_mapping(text):
-    """ Return a list of phonemes and their associated words """
-    # Use regex to split words, ignoring punctuation, to match frontend logic and avoid "times," issues
+def transcribe(audio_waveform: np.ndarray) -> str:
+    """Transcribe audio to text using the Wav2Vec2 CTC head."""
+    _ensure_loaded()
+
+    inputs = _processor(audio_waveform, sampling_rate=TARGET_SAMPLE_RATE,
+                        return_tensors="pt", padding=True)
+    input_values = inputs.input_values.to(DEVICE)
+
+    with torch.no_grad():
+        logits = _model_ctc(input_values).logits
+
+    predicted_ids = torch.argmax(logits, dim=-1).cpu()  # decode on CPU
+    return _processor.batch_decode(predicted_ids)[0]
+
+
+# =====================================================================
+# Phoneme / text comparison (reused OpenPronounce core)
+# =====================================================================
+def get_phonemes_with_word_mapping(text: str):
+    """Return a list of phonemes and a mapping {phoneme_index: source_word}."""
+    # Split on words, ignoring punctuation, to avoid issues like "times,".
     words = re.findall(r"\b[\w']+\b", text)
-    
-    phonemes = []
-    phoneme_to_word = {}
-    
+
+    phonemes: List[str] = []
+    phoneme_to_word: Dict[int, str] = {}
+
     for word in words:
         try:
-            word_phonemes = phonemize(word, language="en-us", backend="espeak", strip=True, preserve_punctuation=False).split()
-        except Exception as e:
-            # warnings.warn(f"Error with espeak for word '{word}', switching to festival: {e}", UserWarning)
+            word_phonemes = phonemize(word, language="en-us", backend="espeak",
+                                      strip=True, preserve_punctuation=False).split()
+        except Exception:
             try:
-                word_phonemes = phonemize(word, language="en-us", backend="festival", strip=True, preserve_punctuation=False).split()
-            except:
-                word_phonemes = [] # Fallback if everything fails
+                word_phonemes = phonemize(word, language="en-us", backend="festival",
+                                          strip=True, preserve_punctuation=False).split()
+            except Exception:
+                word_phonemes = []  # fallback if every backend fails
 
         for phoneme in word_phonemes:
             phoneme_to_word[len(phonemes)] = word
@@ -71,226 +209,140 @@ def get_phonemes_with_word_mapping(text):
 
     return phonemes, phoneme_to_word
 
-def get_phoneme_embeddings(phoneme_seq):
-    """ Convert a phoneme sequence into a numerical sequence """
+
+def get_phoneme_embeddings(phoneme_seq: str) -> np.ndarray:
+    """Convert a phoneme string into a numerical column vector (ord per char)."""
     return np.array([ord(p) for p in phoneme_seq]).reshape(-1, 1)
 
-def compare_transcriptions(transcription, text_reference):
-    """
-    Compare automatic transcription with expected text.
-    """
 
+def compare_transcriptions(transcription: str, text_reference: str) -> Dict[str, Any]:
+    """Compare an ASR transcription against the expected text.
+
+    Identifies per-word pronunciation errors via phoneme alignment and returns
+    distances used by the scoring formula plus contours for optional plotting.
+    """
     transcription_clean = transcription.lower().strip()
     reference_clean = text_reference.lower().strip()
 
-    # Check edit distance between transcription and reference text
+    # Edit distance between transcription and reference text (global word-level signal).
     word_distance = Levenshtein.distance(transcription_clean, reference_clean)
 
-    # Extract phonemes from both versions
+    # Extract phonemes from both versions.
     expected_phonemes, expected_map = get_phonemes_with_word_mapping(text_reference)
     transcribed_phonemes, transcribed_map = get_phonemes_with_word_mapping(transcription_clean)
 
-    # Convert phonemes to numerical sequences for DTW (global score)
+    # Numerical phoneme sequences for the global DTW distance.
     expected_seq = get_phoneme_embeddings(" ".join(expected_phonemes))
     transcribed_seq = get_phoneme_embeddings(" ".join(transcribed_phonemes))
 
-    # Apply DTW to align phonemes (for global score)
     distance, _ = fastdtw(expected_seq, transcribed_seq, dist=euclidean)
 
-    # Identify words with pronunciation errors using Levenshtein on phoneme lists
-    errors = []
+    errors: List[Dict[str, Any]] = []
     words_with_errors = set()
-    
-    # Map each expected phoneme index to a set of transcribed phoneme indices
-    # This allows us to handle 1-to-N and N-to-1 word mappings
+
+    # Map each expected phoneme index to the set of transcribed indices it aligns to.
+    # This handles 1-to-N and N-to-1 word mappings (e.g. "I'm" -> "I M").
     alignment_map = [set() for _ in range(len(expected_phonemes))]
-    
+
     opcodes = Levenshtein.opcodes(expected_phonemes, transcribed_phonemes)
-    
+
     for tag, i1, i2, j1, j2 in opcodes:
         if tag == 'equal':
             for k, l in zip(range(i1, i2), range(j1, j2)):
                 alignment_map[k].add(l)
         elif tag == 'replace':
-            # For replacement, we map the range proportionally
-            # This handles "I'm" (3 phonemes) -> "I M" (4 phonemes) better
-            # And avoids "Hello how are" -> "enou i wor" mapping everything to everything
+            # Map the replaced range proportionally rather than all-to-all,
+            # which keeps "Hello how are" from mapping everything to everything.
             len_i = i2 - i1
             len_j = j2 - j1
             for k in range(i1, i2):
-                # Calculate proportional range in j
                 start_j = j1 + int((k - i1) * len_j / len_i)
                 end_j = j1 + int((k - i1 + 1) * len_j / len_i)
-                
                 if start_j == end_j and len_j > 0:
-                     idx = min(start_j, j2 - 1)
-                     alignment_map[k].add(idx)
+                    idx = min(start_j, j2 - 1)
+                    alignment_map[k].add(idx)
                 else:
                     for l in range(start_j, end_j):
                         alignment_map[k].add(l)
-        elif tag == 'delete':
-            # Expected phonemes have no match
-            pass
-        elif tag == 'insert':
-            # Extra transcribed phonemes (ignored for now)
-            pass
+        # 'delete' (missing expected phonemes) and 'insert' (extra transcribed
+        # phonemes) need no alignment entry here.
 
-    # Group expected phonemes by word
-    expected_words_indices = {} # word -> list of phoneme indices
-    # Since words can be duplicate ("the cat and the dog"), we need to group by (word, position) or just iterate ranges
-    # But phoneme_to_word maps index -> word string. We need to reconstruct the word boundaries.
-    
-    # Let's iterate through the expected phonemes and group them
-    current_word = None
-    word_start_index = 0
-    processed_words = [] # List of (word, start_idx, end_idx)
-    
-    # Reconstruct word boundaries from phoneme_to_word
-    # Note: phoneme_to_word is dense (0, 1, 2...). 
-    # We can just iterate 0..len(expected_phonemes)
-    if expected_phonemes:
-        current_word = expected_map[0]
-        word_start = 0
-        for i in range(1, len(expected_phonemes)):
-            word = expected_map[i]
-            # If the word string changes, or if it's the same word string but logically a new word?
-            # get_phonemes_with_word_mapping flattens everything. 
-            # If we have "that that", phoneme_to_word will show "that" for indices 0..2 and "that" for 3..5
-            # We can't distinguish duplicates easily unless we stored (word, index) in the map.
-            # BUT, we know the order is preserved.
-            # Wait, get_phonemes_with_word_mapping iterates words.
-            # So we can just re-run the word iteration logic to get boundaries?
-            # Or better: modify get_phonemes_with_word_mapping to return boundaries?
-            # For now, let's assume adjacent identical words are merged or handled? 
-            # Actually, "that that" -> "that" (idx 0,1,2), "that" (idx 3,4,5).
-            # If we just look at string change, we merge them. That's a bug for "that that".
-            # FIX: Let's assume we can't easily reconstruct boundaries from just the map.
-            # Let's rely on the fact that we process words in order.
-            pass
-
-    # Better approach: Iterate over the original words again to get their phoneme counts
-    # We need the original word list.
+    # Walk the reference words in order to recover phoneme boundaries reliably
+    # (the flat phoneme_to_word map cannot distinguish adjacent duplicate words).
     expected_words_list = re.findall(r"\b[\w']+\b", text_reference)
-    
     current_phoneme_idx = 0
-    
+
     for word in expected_words_list:
-        # Re-generate phonemes for this word to know how many there are
-        # (This is slightly inefficient but safe)
+        # Re-phonemize the word to learn how many phonemes it owns.
         try:
-            p_list = phonemize(word, language="en-us", backend="espeak", strip=True, preserve_punctuation=False).split()
-        except:
+            p_list = phonemize(word, language="en-us", backend="espeak",
+                               strip=True, preserve_punctuation=False).split()
+        except Exception:
             try:
-                p_list = phonemize(word, language="en-us", backend="festival", strip=True, preserve_punctuation=False).split()
-            except:
+                p_list = phonemize(word, language="en-us", backend="festival",
+                                   strip=True, preserve_punctuation=False).split()
+            except Exception:
                 p_list = []
-        
+
         if not p_list:
-            # Word has no phonemes (e.g. number or symbol that failed?)
-            continue
-            
-        # Range for this word
+            continue  # word produced no phonemes (e.g. a number/symbol)
+
         word_indices = range(current_phoneme_idx, current_phoneme_idx + len(p_list))
         current_phoneme_idx += len(p_list)
-        
-        # Find corresponding transcribed words
+
+        # Collect the transcribed phoneme indices this word aligns to.
         matched_trans_indices = set()
         for idx in word_indices:
             if idx < len(alignment_map):
                 matched_trans_indices.update(alignment_map[idx])
-        
-        if not matched_trans_indices:
-            # Word is missing
-            errors.append({"position": word_indices.start, "expected": word, "actual": "", "word": word})
-            words_with_errors.add(word)
-        else:
-            # Get the transcribed words for these indices
-            actual_words = []
-            sorted_trans_indices = sorted(list(matched_trans_indices))
-            
-            # We need to group these indices into words
-            # transcribed_map maps idx -> word string
-            # We want to reconstruct the phrase "I M" from indices
-            
-            # Simple approach: get all word strings, unique them preserving order
-            seen_words = set()
-            for tidx in sorted_trans_indices:
-                if tidx in transcribed_map:
-                    w = transcribed_map[tidx]
-                    # We want to capture "I" and "M". 
-                    # If we just add to set, we lose order? No, we iterate sorted indices.
-                    # But "I" might span indices 0,1. We see "I", "I".
-                    if w not in seen_words: # This prevents "I I" -> "I"
-                        actual_words.append(w)
-                        seen_words.add(w) # This prevents "that that" -> "that that" if they are identical?
-                        # This is a limitation. But for "I M", it works: "I", "M".
-                        # For "that that", it would become "that". Acceptable for now.
-            
-            actual_text = " ".join(actual_words)
-            
-            # Compare
-            # We compare the *text* of the word vs the *text* of the actual words
-            # But we also want to check pronunciation quality?
-            # If text matches, we assume pronunciation is good?
-            # Or do we check phoneme distance?
-            # The user wants to see "Mispronunciation" or "Missing".
-            # If text matches "I" vs "I", it's good.
-            # If "I'm" vs "I M", is that an error?
-            # "I'm" vs "I M" -> Levenshtein("I'm", "I M") = 2.
-            # Maybe we should check phoneme distance between the *segments*?
-            
-            # Let's calculate phoneme distance between expected segment and actual segment
-            expected_seg = [expected_phonemes[i] for i in word_indices]
-            actual_seg = [transcribed_phonemes[i] for i in sorted_trans_indices]
-            
-            # Use Levenshtein on phonemes
-            p_dist = Levenshtein.distance(expected_seg, actual_seg)
-            
-            # Normalize distance
-            # If p_dist > threshold, mark as error
-            # Threshold: e.g. > 20% of length?
-            # We remove max(1, ...) to be stricter on short words (len 1-2)
-            if p_dist > len(expected_seg) * 0.4:
-                # It's a mispronunciation
-                # We show the phonemes of the *actual* segment
-                # And the text of the *actual* words
-                
-                # Construct actual phoneme string
-                actual_phoneme_str = "".join(actual_seg) # Or space separated?
-                # The frontend expects a string.
-                # Let's use the phoneme list directly? No, frontend expects string?
-                # Frontend: `/${error.actual}/`
-                
-                # Wait, `actual` in error object is used for phonemes in frontend?
-                # In previous code: `actual: transcribed_phonemes[j]` (single phoneme)
-                # Now we have a sequence.
-                
-                errors.append({
-                    "position": word_indices.start,
-                    "expected": "".join(expected_seg), # Phonemes
-                    "actual": "".join(actual_seg), # Phonemes
-                    "word": word, # Expected Word Text
-                    "actual_word": actual_text # Actual Word Text (e.g. "I M") - NEW FIELD
-                })
-                words_with_errors.add(word)
 
-    # Generate understandable feedback
+        if not matched_trans_indices:
+            # Word is missing from the transcription entirely.
+            errors.append({"position": word_indices.start, "expected": word,
+                           "actual": "", "word": word})
+            words_with_errors.add(word)
+            continue
+
+        sorted_trans_indices = sorted(matched_trans_indices)
+
+        # Reconstruct the actual word(s), de-duplicating while preserving order.
+        actual_words: List[str] = []
+        seen_words = set()
+        for tidx in sorted_trans_indices:
+            if tidx in transcribed_map:
+                w = transcribed_map[tidx]
+                if w not in seen_words:
+                    actual_words.append(w)
+                    seen_words.add(w)
+        actual_text = " ".join(actual_words)
+
+        # Compare the expected vs actual phoneme segments.
+        expected_seg = [expected_phonemes[i] for i in word_indices]
+        actual_seg = [transcribed_phonemes[i] for i in sorted_trans_indices]
+
+        p_dist = Levenshtein.distance(expected_seg, actual_seg)
+
+        # Mark a mispronunciation when the phoneme edit distance exceeds 40% of length.
+        if p_dist > len(expected_seg) * 0.4:
+            errors.append({
+                "position": word_indices.start,
+                "expected": "".join(expected_seg),  # expected phonemes
+                "actual": "".join(actual_seg),      # actual phonemes
+                "word": word,                       # expected word text
+                "actual_word": actual_text,         # actual word text (e.g. "I M")
+            })
+            words_with_errors.add(word)
+
+    # Human-readable feedback summary.
     feedback = "🔊 Feedback on your pronunciation:\n"
     if words_with_errors:
         feedback += "❌ You need to better pronounce these words: " + ", ".join(words_with_errors) + "\n"
     else:
         feedback += "✅ Your pronunciation is excellent! 🎉\n"
 
-    # errors is an array, but can contains multiple time the same word (for complex sounds). We want to keep only one occurence of each word
-    # With new logic, we iterate words, so uniqueness is guaranteed per position.
-    # errors = [dict(t) for t in {tuple(d.items()) for d in errors}] 
-
-    # Convert vectors to JSON for later display of expected and obtained traces
-    expected_vector = expected_seq.tolist()
-    transcribed_vector = transcribed_seq.tolist()
-
-    # Alignement avec DTW (pour les durées différentes)
-    expected_vector, transcribed_vector = align_sequences_dtw(expected_vector, transcribed_vector)
+    # DTW-align the numeric phoneme vectors so the two contours share a length.
+    expected_vector, transcribed_vector = align_sequences_dtw(
+        expected_seq.tolist(), transcribed_seq.tolist())
 
     return {
         "word_distance": word_distance,
@@ -305,126 +357,123 @@ def compare_transcriptions(transcription, text_reference):
         "words_with_errors": list(words_with_errors),
     }
 
+
 def align_sequences_dtw(seq1, seq2):
+    """Align two numeric sequences with DTW and return equal-length arrays.
+
+    Lets contours of different speeds/lengths be compared directly.
     """
-    Align two sequences of numerical values using Dynamic Time Warping (DTW).
-    Returns the interpolated sequences to have the same length.
-    This allows for easier comparison of the two sequences, as one may be faster than the other,
-    or shorter.
-    """
-    distance, path = fastdtw(seq1, seq2, dist=euclidean)
-    
+    _distance, path = fastdtw(seq1, seq2, dist=euclidean)
+
     aligned_seq1 = []
     aligned_seq2 = []
-
     for i, j in path:
-        aligned_seq1.append(seq1[i][0])  # Preserve the first dimension
+        aligned_seq1.append(seq1[i][0])  # preserve the first (only) dimension
         aligned_seq2.append(seq2[j][0])
-
-    # we amplify the difference artificially, otherwise the two curves often overlap
-    # aligned_seq2 = aligned_seq2 + (aligned_seq2 - aligned_seq1) * 2
 
     return np.array(aligned_seq1), np.array(aligned_seq2)
 
-def compute_pronunciation_score(distance_dtw, phoneme_distance, word_distance, max_dtw=500, max_lev=30):
-    """
-    Calculate a score out of 100 by normalizing distances.
-    """
-    # Normalization of distances
+
+def compute_pronunciation_score(distance_dtw, phoneme_distance, word_distance,
+                                max_dtw=500, max_lev=30) -> float:
+    """Combine the three distances into a 0-100 score (heuristic, tunable)."""
     dtw_score = max(0, 100 - (distance_dtw / max_dtw) * 100)
     phoneme_score = max(0, 100 - (phoneme_distance / max_dtw) * 100)
     word_score = max(0, 100 - (word_distance / max_lev) * 100)
-    
-    # Ponderate the different components: DTW 40%, Phonemes 30%, Words 30%
+
+    # Weighting: acoustic DTW 40%, phonemes 30%, words 30%.
     final_score = 0.4 * dtw_score + 0.3 * phoneme_score + 0.3 * word_score
 
-    # edge cases
-    if final_score < 0:
-        final_score = 0
-
-    if final_score > 100:
-        final_score = 100
-    
+    final_score = min(100.0, max(0.0, final_score))
     return round(final_score, 2)
 
-def compare_audio_with_text(audio_1, text_reference, sampling_rate=16000):
-    """
-    Compare a user's pronunciation with a text reference.
-    """
 
-    # Extract Wav2Vec2 embeddings from user audio
-    emb_1 = extract_embeddings(audio_1, sampling_rate)
-
-    # Generate a reference audio (via TTS) and extract its embeddings
-    reference_file = audio.text2speech(text_reference)
-
-    # Generate the reference audio (via TTS) and extract its embeddings
-    # Assume here that you already have a `reference.wav` file generated from the text.
-    audio_2, sr = torchaudio.load(reference_file)
-    emb_2 = extract_embeddings(audio_2, sr)
-
-    # Apply DTW to align the embeddings
-    distance, path = fastdtw(emb_1, emb_2, dist=euclidean)
-    distance = int(distance)  # Convert to int for easier reading
-    
-    # Convert the reference text into phonemes and get the word-phoneme mapping
-    expected_phonemes, phoneme_to_word = get_phonemes_with_word_mapping(text_reference)
-    transcription = transcribe(audio_1)
-
-    # Identify divergences between expected phonemes and transcribed phonemes
-    differences = compare_transcriptions(transcription, text_reference)
-
-    score = compute_pronunciation_score(distance, differences["phoneme_distance"], differences["word_distance"])
-
-    # prosody
-    energy = extract_energy(audio_1)
-    f0 = interpolate_f0(extract_f0(audio_1, sampling_rate))
-
-    return {
-        "score": score,
-        "distance": distance, 
-        "differences": differences, 
-        "feedback": differences["feedback"],
-        "transcribe": differences["transcribe"],
-        "prosody": {
-            "f0": f0.tolist(),
-            "energy": energy.tolist()
-        }
-    }
+# =====================================================================
+# Prosody (pitch & energy contours)
+# =====================================================================
+def extract_f0(audio_waveform: np.ndarray, sr: int = TARGET_SAMPLE_RATE) -> np.ndarray:
+    """Extract the fundamental frequency (F0) contour; NaNs -> 0."""
+    f0, _voiced_flag, _voiced_probs = librosa.pyin(audio_waveform, fmin=50, fmax=300, sr=sr)
+    return np.nan_to_num(f0)
 
 
-def extract_f0(audio_waveform, sr=16000):
-    """ Extract the fundamental frequency F0 from the audio """
-    f0, voiced_flag, voiced_probs = librosa.pyin(audio_waveform, fmin=50, fmax=300)
-    f0 = np.nan_to_num(f0)  # Replace NaNs with 0
-    return f0
-
-def extract_energy(audio_waveform):
-    """ Extract and normalize the energy of the audio """
+def extract_energy(audio_waveform: np.ndarray) -> np.ndarray:
+    """Extract and scale the RMS energy contour to roughly match the F0 range."""
     energy = librosa.feature.rms(y=audio_waveform)
-    scaler = MinMaxScaler(feature_range=(0, 250))  # Scale between 0 and 250 to match F0
-    energy_scaled = scaler.fit_transform(energy.T).flatten()
-    return energy_scaled
+    scaler = MinMaxScaler(feature_range=(0, 250))  # 0-250 to align with F0 scale
+    return scaler.fit_transform(energy.T).flatten()
 
-def interpolate_f0(f0):
-    """ Interpolate missing F0 values to avoid gaps in the graph """
+
+def interpolate_f0(f0: np.ndarray) -> np.ndarray:
+    """Interpolate missing (zero) F0 values to avoid gaps in the contour."""
     f0 = np.array(f0)
-    mask = f0 > 0  # Keep only valid values
-    f0_interp = np.interp(np.arange(len(f0)), np.where(mask)[0], f0[mask])
-    return f0_interp
+    mask = f0 > 0
+    if not mask.any():  # fully unvoiced/silent input -> nothing to interpolate
+        return f0
+    return np.interp(np.arange(len(f0)), np.where(mask)[0], f0[mask])
 
 
-def transcribe(audio):
-    """ Transcribe the audio into text with Wav2Vec2 """
-    inputs = processor(audio, sampling_rate=16000, return_tensors="pt", padding=True)
-    with torch.no_grad():
-        logits = modelCTC(inputs.input_values).logits
-    predicted_ids = torch.argmax(logits, dim=-1)
-    return processor.batch_decode(predicted_ids)[0]
-
-def clean_transcription(text):
-    """ Clean the transcription text """
+def clean_transcription(text: str) -> str:
+    """Lower-case, strip punctuation and collapse whitespace in a transcription."""
     text = text.lower().strip()
-    text = re.sub(r"[^a-zA-Z' ]+", "", text)  # Remove special characters
-    text = text.replace("  ", " ")  # Avoid multiple spaces
-    return text.strip()
+    text = re.sub(r"[^a-zA-Z' ]+", "", text)
+    return " ".join(text.split()).strip()
+
+
+# =====================================================================
+# Single entry point
+# =====================================================================
+def analyze(user_audio: np.ndarray,
+            expected_text: str,
+            reference_audio: np.ndarray,
+            user_sr: int = TARGET_SAMPLE_RATE,
+            reference_sr: int = KOKORO_SAMPLE_RATE) -> PronunciationResult:
+    """Compare a user's spoken attempt against the expected phrase.
+
+    Args:
+        user_audio: user's recorded waveform (1-D float32; from the recording path).
+        expected_text: the reference phrase the user was asked to repeat.
+        reference_audio: Kokoro-synthesised reference waveform for the same phrase.
+        user_sr: sample rate of ``user_audio`` (recording path is 16 kHz).
+        reference_sr: sample rate of ``reference_audio`` (Kokoro is 24 kHz).
+
+    Returns:
+        PronunciationResult with score, per-word errors, prosody and transcription.
+    """
+    _ensure_loaded()
+
+    user_wav = _prepare_waveform(user_audio, user_sr)
+    reference_wav = _prepare_waveform(reference_audio, reference_sr)
+
+    # Acoustic similarity: DTW distance between the two embedding sequences.
+    emb_user = extract_embeddings(user_wav)
+    emb_reference = extract_embeddings(reference_wav)
+    acoustic_distance, _ = fastdtw(emb_user, emb_reference, dist=euclidean)
+    acoustic_distance = int(acoustic_distance)
+
+    # Transcription + per-word phoneme comparison.
+    transcription = clean_transcription(transcribe(user_wav))
+    differences = compare_transcriptions(transcription, expected_text)
+
+    score = compute_pronunciation_score(
+        acoustic_distance,
+        differences["phoneme_distance"],
+        differences["word_distance"],
+    )
+
+    # Prosody contours from the user's audio.
+    energy = extract_energy(user_wav)
+    f0 = interpolate_f0(extract_f0(user_wav, TARGET_SAMPLE_RATE))
+
+    return PronunciationResult(
+        score=score,
+        word_errors=differences["errors"],
+        prosody={"f0": f0.tolist(), "energy": energy.tolist()},
+        transcription=transcription,
+        passed=score >= SCORE_THRESHOLD,
+        feedback=differences["feedback"],
+        acoustic_distance=acoustic_distance,
+        words_with_errors=differences["words_with_errors"],
+        expected_phonemes=differences["expected_phonemes"],
+        transcribed_phonemes=differences["transcribed_phonemes"],
+    )
