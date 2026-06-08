@@ -142,6 +142,23 @@ class PronunciationTrainerGUI:
                              bordercolor="#121214",
                              arrowcolor="#8a2be2")
 
+        # Dark-theme styling for the reference-speed combobox.
+        self.style.configure("TCombobox",
+                             fieldbackground="#1f1430",
+                             background="#1f1430",
+                             foreground="#d6c2ff",
+                             arrowcolor="#8a2be2",
+                             bordercolor="#25252a",
+                             relief="flat")
+        self.style.map("TCombobox",
+                       fieldbackground=[("readonly", "#1f1430")],
+                       foreground=[("readonly", "#d6c2ff")])
+        # The popdown list is a classic Tk Listbox, themed via the option DB.
+        self.root.option_add("*TCombobox*Listbox.background", "#1a1a1e")
+        self.root.option_add("*TCombobox*Listbox.foreground", "#d6c2ff")
+        self.root.option_add("*TCombobox*Listbox.selectBackground", "#2a1a45")
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+
     def _make_button(self, parent, text, command):
         """Create a consistently styled dark-theme button."""
         return tk.Button(parent, text=text, command=command,
@@ -193,11 +210,8 @@ class PronunciationTrainerGUI:
 
         replay_frame = tk.Frame(control_frame, bg="#121214")
         replay_frame.pack(pady=5)
-        self.ref_btn = self._make_button(replay_frame, "▶ Reference", self.play_reference)
-        self.ref_btn.pack(side=tk.LEFT, padx=5)
         self.user_btn = self._make_button(replay_frame, "▶ My recording", self.play_user_recording)
         self.user_btn.pack(side=tk.LEFT, padx=5)
-        self.ref_btn.config(state=tk.DISABLED)
         self.user_btn.config(state=tk.DISABLED)
 
         # 4. Source text panel (editable)
@@ -214,8 +228,28 @@ class PronunciationTrainerGUI:
             padx=10, pady=8)
         self.source_text.pack(fill=tk.X, pady=4)
 
-        self.generate_btn = self._make_button(source_frame, "🎲 New phrase", self.on_generate_phrase)
-        self.generate_btn.pack(anchor=tk.E)
+        # Action row: reference-playback speed, the Reference replay button, and
+        # the New phrase button are grouped together on the right.
+        action_frame = tk.Frame(source_frame, bg="#121214")
+        action_frame.pack(anchor=tk.E, pady=(2, 0))
+
+        tk.Label(action_frame, text="Reference speed:", font=("Segoe UI", 9),
+                 fg="#a0a0a5", bg="#121214").pack(side=tk.LEFT, padx=(0, 6))
+
+        # Lower values slow the reference playback (see play_reference). Stored as
+        # the displayed label and parsed back to a float by _selected_speed().
+        self.playback_speed = tk.StringVar(value="1.0×")
+        self.speed_selector = ttk.Combobox(
+            action_frame, textvariable=self.playback_speed, state="readonly",
+            width=5, values=("1.0×", "0.85×", "0.7×"))
+        self.speed_selector.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.ref_btn = self._make_button(action_frame, "▶ Reference", self.play_reference)
+        self.ref_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self.ref_btn.config(state=tk.DISABLED)
+
+        self.generate_btn = self._make_button(action_frame, "🎲 New phrase", self.on_generate_phrase)
+        self.generate_btn.pack(side=tk.LEFT)
         self.generate_btn.config(state=tk.DISABLED)
 
         # 5. Current phrase card
@@ -274,10 +308,10 @@ class PronunciationTrainerGUI:
     # Feedback / status helpers (always called on the main thread)
     # ------------------------------------------------------------------
     def append_system_msg(self, text: str):
-        self.feedback_display.configure(state=tk.NORMAL)
-        self.feedback_display.insert(tk.END, f"[System] {text}\n", "system")
-        self.feedback_display.configure(state=tk.DISABLED)
-        self.feedback_display.see(tk.END)
+        # System messages are intentionally kept out of the on-screen feedback
+        # panel so it stays focused on pronunciation feedback. They are still
+        # written to the log file for diagnostics.
+        logging.info(f"[System] {text}")
 
     def update_status(self, text: str, color: str = "#a0a0a5"):
         self.status_label.configure(text=f"Status: {text}", fg=color)
@@ -395,6 +429,9 @@ class PronunciationTrainerGUI:
         self.update_instruction("Edit the text, then click 'New phrase' to begin.")
         self.generate_btn.config(state=tk.NORMAL)
         self.append_system_msg("Ready. Generate a phrase, listen, then hold SPACE to repeat it.")
+        # Auto-generate the first phrase so the user isn't met with an empty
+        # "Say this:" card; afterwards generation is driven by the New phrase button.
+        self.on_generate_phrase()
 
     # ------------------------------------------------------------------
     # Phrase generation + Prompt phase
@@ -781,10 +818,26 @@ class PronunciationTrainerGUI:
     # ------------------------------------------------------------------
     # Playback (reference / own recording)
     # ------------------------------------------------------------------
+    def _selected_speed(self) -> float:
+        """Parse the reference-speed selector (e.g. '0.75×') into a float.
+
+        Falls back to normal speed (1.0) if the value is missing or malformed.
+        """
+        try:
+            return float(self.playback_speed.get().rstrip("×"))
+        except (ValueError, AttributeError):
+            return 1.0
+
     def play_reference(self):
         if self.reference_audio is None or self.reference_audio.size == 0:
             return
-        self._play_async(self.reference_audio, KOKORO_SAMPLE_RATE, "Playing reference...")
+        # Slowing is done by lowering the effective sample rate: playing 24 kHz
+        # audio at, say, 12 kHz (0.5×) makes it twice as long. This is the simple
+        # resampling approach — it also shifts the pitch down, no extra deps.
+        speed = self._selected_speed()
+        effective_sr = int(KOKORO_SAMPLE_RATE * speed)
+        status = "Playing reference..." if speed == 1.0 else f"Playing reference ({speed:g}×)..."
+        self._play_async(self.reference_audio, effective_sr, status)
 
     def play_user_recording(self):
         if self.last_user_audio is None or self.last_user_audio.size == 0:
