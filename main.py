@@ -83,12 +83,41 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         self.root.title("EchoLoop - Pronunciation Trainer")
         self.root.configure(bg="#121214")
 
-        # Center the window on the screen. winfo_screen* are valid before the
-        # first mainloop iteration, so the window appears centered from the start.
-        window_width, window_height = 520, 820
+        # Fixed width; the window spans the full usable screen height. We query the
+        # Windows desktop work area (screen minus the taskbar) so the window fits
+        # without being clipped, and fall back to the full screen height on other
+        # platforms or if the query fails. Horizontally centered, pinned to the top
+        # of the work area. winfo_screen* are valid before the first mainloop
+        # iteration, so the size/position are correct from the start.
+        window_width = 520
+        work_top, avail_height = 0, self.root.winfo_screenheight()
+        try:
+            import ctypes
+            from ctypes import wintypes
+            SPI_GETWORKAREA = 0x0030
+            rect = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(
+                    SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+                work_top = rect.top
+                avail_height = rect.bottom - rect.top
+        except Exception:
+            logging.debug("Work-area query failed; using full screen height.", exc_info=True)
+
         x = (self.root.winfo_screenwidth() - window_width) // 2
-        y = (self.root.winfo_screenheight() - window_height) // 2
-        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+        # Tk's geometry height is the client area, while the position is the outer
+        # frame. With a full work-area height the title bar pushes the client area
+        # past the work area, hiding the bottom status bar under the taskbar. So we
+        # apply a first guess, measure the actual frame (title bar + borders) once
+        # the window is realized, and subtract it so the whole window fits and the
+        # status bar stays visible. If the frame can't be measured yet, the guess
+        # is kept unchanged.
+        self.root.geometry(f"{window_width}x{avail_height}+{x}+{work_top}")
+        self.root.update_idletasks()
+        caption = max(self.root.winfo_rooty() - self.root.winfo_y(), 0)
+        border = max(self.root.winfo_rootx() - self.root.winfo_x(), 0)
+        window_height = avail_height - caption - border
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{work_top}")
 
         # Thread management events
         self.shutdown_event = threading.Event()
