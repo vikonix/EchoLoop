@@ -134,19 +134,62 @@ WHISPER_INITIAL_PROMPT = (
 )
 
 # =====================================================================
+# English Accent
+# =====================================================================
+# Target English accent, selected at startup. Changing it requires a restart:
+# the Kokoro pipeline language, the default/selectable voices, and the espeak
+# language used to build the reference phonemes are all wired from this profile
+# at load time (there is no runtime switch).
+#   "american" — General American
+#   "british"  — British (Received Pronunciation)
+ENGLISH_ACCENT = "american"
+
+# Per-accent settings. Voice prefixes: 'af_'/'bf_' = female, 'am_'/'bm_' = male
+# (a = American, b = British). A voice's data is downloaded on first use and
+# cached locally. The espeak_language must match the accent so pronunciation is
+# scored against phonemes of the same dialect (see pronounce/speech.py).
+_ACCENT_PROFILES = {
+    "american": {
+        "kokoro_lang_code": "a",
+        "espeak_language": "en-us",
+        "default_voice": "af_heart",
+        "voices": [
+            "af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky",
+            "am_adam", "am_michael", "am_echo", "am_eric", "am_liam",
+        ],
+    },
+    "british": {
+        "kokoro_lang_code": "b",
+        "espeak_language": "en-gb",
+        "default_voice": "bf_emma",
+        "voices": [
+            "bf_emma", "bf_alice", "bf_isabella", "bf_lily",
+            "bm_george", "bm_daniel", "bm_fable", "bm_lewis",
+        ],
+    },
+}
+
+if ENGLISH_ACCENT not in _ACCENT_PROFILES:
+    raise ValueError(
+        f"Unknown ENGLISH_ACCENT {ENGLISH_ACCENT!r}; "
+        f"expected one of {sorted(_ACCENT_PROFILES)}"
+    )
+_ACCENT = _ACCENT_PROFILES[ENGLISH_ACCENT]
+
+# espeak language code ("en-us"/"en-gb") used by the pronunciation analyzer to
+# phonemize the reference text. Read by pronounce/speech.py.
+ESPEAK_LANGUAGE = _ACCENT["espeak_language"]
+
+# =====================================================================
 # Text-to-Speech (Kokoro) Settings
 # =====================================================================
-KOKORO_LANG_CODE = "a"        # 'a' = American English, 'b' = British English, etc.
-KOKORO_VOICE = "af_heart"     # Default voice model identifier
+# Derived from the selected accent above ('a' = American, 'b' = British).
+KOKORO_LANG_CODE = _ACCENT["kokoro_lang_code"]
+KOKORO_VOICE = _ACCENT["default_voice"]   # Default voice model identifier
 
-# Voices the user can pick from in the UI. All belong to lang_code 'a'
-# (American English), so switching between them needs no pipeline reload.
-# Prefix convention: 'af_' = American female, 'am_' = American male.
-# A voice's data is downloaded on first use and then cached locally.
-KOKORO_VOICES = [
-    "af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky",
-    "am_adam", "am_michael", "am_echo", "am_eric", "am_liam",
-]
+# Voices the user can pick from in the UI. All belong to the same lang_code, so
+# switching between them needs no pipeline reload.
+KOKORO_VOICES = _ACCENT["voices"]
 
 # =====================================================================
 # Pronunciation Analysis (Wav2Vec2) Settings

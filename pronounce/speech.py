@@ -59,6 +59,10 @@ MODEL_NAME = getattr(config, "WAV2VEC2_MODEL_NAME", "facebook/wav2vec2-large-960
 DEVICE = getattr(config, "WAV2VEC2_DEVICE", config.DEVICE)
 # Score (0-100) at or above which a repetition is considered acceptable.
 SCORE_THRESHOLD = getattr(config, "PRONUNCE_SCORE_THRESHOLD", 70.0)
+# espeak dialect ("en-us"/"en-gb") used to phonemize the reference text. Follows
+# the accent selected in config so British speech is scored against British
+# phonemes (and American against American), not always en-us.
+ESPEAK_LANGUAGE = getattr(config, "ESPEAK_LANGUAGE", "en-us")
 
 # Lazily-initialised model singletons (loaded once, reused for every analysis).
 _processor: Optional[Wav2Vec2Processor] = None
@@ -194,7 +198,7 @@ def get_phonemes_with_word_mapping(text: str):
 
     for word in words:
         try:
-            word_phonemes = phonemize(word, language="en-us", backend="espeak",
+            word_phonemes = phonemize(word, language=ESPEAK_LANGUAGE, backend="espeak",
                                       strip=True, preserve_punctuation=False).split()
         except Exception:
             try:
@@ -275,7 +279,7 @@ def compare_transcriptions(transcription: str, text_reference: str) -> Dict[str,
     for word in expected_words_list:
         # Re-phonemize the word to learn how many phonemes it owns.
         try:
-            p_list = phonemize(word, language="en-us", backend="espeak",
+            p_list = phonemize(word, language=ESPEAK_LANGUAGE, backend="espeak",
                                strip=True, preserve_punctuation=False).split()
         except Exception:
             try:
