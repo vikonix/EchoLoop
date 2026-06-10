@@ -26,6 +26,7 @@ import logging
 import re
 import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -266,25 +267,34 @@ def transcribe(audio_waveform: np.ndarray) -> str:
 # =====================================================================
 # Phoneme / text comparison (reused OpenPronounce core)
 # =====================================================================
-def get_phonemes_with_word_mapping(text: str):
-    """Return a list of phonemes and a mapping {phoneme_index: source_word}."""
+@lru_cache(maxsize=4096)
+def _phonemize_word(word: str) -> tuple:
+    """Phonemize one word (each phonemize call spawns espeak, so cache results;
+    words repeat both across attempts at a phrase and across phrases)."""
+    try:
+        return tuple(phonemize(word, language=ESPEAK_LANGUAGE, backend="espeak",
+                               strip=True, preserve_punctuation=False).split())
+    except Exception:
+        try:
+            return tuple(phonemize(word, language="en-us", backend="festival",
+                                   strip=True, preserve_punctuation=False).split())
+        except Exception:
+            return ()  # fallback if every backend fails
+
+
+def get_word_phonemes(text: str) -> List[tuple]:
+    """Return ordered (word, phonemes) pairs for each word in the text."""
     # Split on words, ignoring punctuation, to avoid issues like "times,".
     words = re.findall(r"\b[\w']+\b", text)
+    return [(word, _phonemize_word(word)) for word in words]
 
+
+def get_phonemes_with_word_mapping(text: str):
+    """Return a list of phonemes and a mapping {phoneme_index: source_word}."""
     phonemes: List[str] = []
     phoneme_to_word: Dict[int, str] = {}
 
-    for word in words:
-        try:
-            word_phonemes = phonemize(word, language=ESPEAK_LANGUAGE, backend="espeak",
-                                      strip=True, preserve_punctuation=False).split()
-        except Exception:
-            try:
-                word_phonemes = phonemize(word, language="en-us", backend="festival",
-                                          strip=True, preserve_punctuation=False).split()
-            except Exception:
-                word_phonemes = []  # fallback if every backend fails
-
+    for word, word_phonemes in get_word_phonemes(text):
         for phoneme in word_phonemes:
             phoneme_to_word[len(phonemes)] = word
             phonemes.append(phoneme)
@@ -309,8 +319,11 @@ def compare_transcriptions(transcription: str, text_reference: str) -> Dict[str,
     # Edit distance between transcription and reference text (global word-level signal).
     word_distance = Levenshtein.distance(transcription_clean, reference_clean)
 
-    # Extract phonemes from both versions.
-    expected_phonemes, expected_map = get_phonemes_with_word_mapping(text_reference)
+    # Extract phonemes from both versions. The reference keeps its per-word
+    # grouping so the word-boundary walk below reuses it instead of running
+    # espeak a second time for every word.
+    expected_pairs = get_word_phonemes(text_reference)
+    expected_phonemes = [p for _word, word_phonemes in expected_pairs for p in word_phonemes]
     transcribed_phonemes, transcribed_map = get_phonemes_with_word_mapping(transcription_clean)
 
     # Global phoneme distance: edit distance over the phoneme sequences. Unlike
@@ -353,22 +366,10 @@ def compare_transcriptions(transcription: str, text_reference: str) -> Dict[str,
         # phonemes) need no alignment entry here.
 
     # Walk the reference words in order to recover phoneme boundaries reliably
-    # (the flat phoneme_to_word map cannot distinguish adjacent duplicate words).
-    expected_words_list = re.findall(r"\b[\w']+\b", text_reference)
+    # (a flat phoneme-to-word map cannot distinguish adjacent duplicate words).
     current_phoneme_idx = 0
 
-    for word in expected_words_list:
-        # Re-phonemize the word to learn how many phonemes it owns.
-        try:
-            p_list = phonemize(word, language=ESPEAK_LANGUAGE, backend="espeak",
-                               strip=True, preserve_punctuation=False).split()
-        except Exception:
-            try:
-                p_list = phonemize(word, language="en-us", backend="festival",
-                                   strip=True, preserve_punctuation=False).split()
-            except Exception:
-                p_list = []
-
+    for word, p_list in expected_pairs:
         if not p_list:
             continue  # word produced no phonemes (e.g. a number/symbol)
 
@@ -545,6 +546,33 @@ def clean_transcription(text: str) -> str:
 
 
 # =====================================================================
+# Reference feature cache
+# =====================================================================
+# A phrase is repeated many times against the same Kokoro reference, but the
+# reference-side waveform, embeddings, F0 and energy never change between
+# attempts. Cache the most recent reference (one phrase is practiced at a time)
+# so repeats skip the Wav2Vec2 pass and pyin pitch tracking on the reference.
+_reference_cache: Dict[str, Any] = {}
+
+
+def _reference_features(reference_audio: np.ndarray, reference_sr: int) -> Dict[str, Any]:
+    """Return the prepared waveform, embeddings and prosody of the reference."""
+    global _reference_cache
+    arr = np.asarray(reference_audio)
+    key = (reference_sr, arr.shape, hash(arr.tobytes()))
+    if _reference_cache.get("key") != key:
+        wav = _trim_silence(_prepare_waveform(arr, reference_sr))
+        _reference_cache = {
+            "key": key,
+            "wav": wav,
+            "embeddings": extract_embeddings(wav),
+            "f0": interpolate_f0(extract_f0(wav, TARGET_SAMPLE_RATE)),
+            "energy": extract_energy(wav),
+        }
+    return _reference_cache
+
+
+# =====================================================================
 # Single entry point
 # =====================================================================
 def _append_calibration_sample(record: Dict[str, Any]) -> None:
@@ -583,14 +611,15 @@ def analyze(user_audio: np.ndarray,
     # Trim silent padding: user takes have button-press pauses (with the noise
     # floor boosted by peak normalization), the TTS reference has almost none.
     user_wav = _trim_silence(_prepare_waveform(user_audio, user_sr))
-    reference_wav = _trim_silence(_prepare_waveform(reference_audio, reference_sr))
+    reference = _reference_features(reference_audio, reference_sr)
+    reference_wav = reference["wav"]
 
     # Acoustic similarity: cosine DTW between the two embedding sequences,
     # normalized by the alignment path length so it does not grow with phrase
     # duration. Cosine (vs euclidean) also ignores embedding magnitude, which
     # drifts with loudness/voice rather than pronunciation.
     emb_user = extract_embeddings(user_wav)
-    emb_reference = extract_embeddings(reference_wav)
+    emb_reference = reference["embeddings"]
     acoustic_total, path = fastdtw(emb_user, emb_reference, dist=cosine)
     acoustic_per_step = float(acoustic_total) / max(1, len(path))
     acoustic_baseline = _random_pair_baseline(emb_user, emb_reference)
@@ -641,8 +670,8 @@ def analyze(user_audio: np.ndarray,
     # the GUI can show "you vs reference" pitch and energy on the same axes.
     energy = extract_energy(user_wav)
     f0 = interpolate_f0(extract_f0(user_wav, TARGET_SAMPLE_RATE))
-    ref_energy = extract_energy(reference_wav)
-    ref_f0 = interpolate_f0(extract_f0(reference_wav, TARGET_SAMPLE_RATE))
+    ref_energy = reference["energy"]
+    ref_f0 = reference["f0"]
 
     return PronunciationResult(
         score=score,

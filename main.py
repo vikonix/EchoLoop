@@ -24,7 +24,10 @@ from tts import TTSManager, KOKORO_SAMPLE_RATE
 import pronounce
 from ui import PronunciationTrainerUI, LENGTH_FEW_WORDS
 
-# Configure comprehensive events logging (console + file)
+# Configure comprehensive events logging (console + file). force=True replaces
+# any handlers auto-installed by logging calls during the imports above (e.g.
+# pronounce loads calibration.json at import and logs it), which would otherwise
+# turn this basicConfig into a silent no-op and leave main.log empty.
 log_format = "%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s"
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +35,8 @@ logging.basicConfig(
     handlers=[
         logging.FileHandler(config.LOG_FILE, mode="w", encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
-    ]
+    ],
+    force=True,
 )
 
 # Technical recording & signal processing parameters
