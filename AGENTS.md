@@ -25,10 +25,10 @@ Also requires the native **espeak-ng** binary on `PATH` (used by `phonemizer`) a
 ## Architecture
 
 - [`main.py`](main.py) — `PronunciationTrainerGUI`: Tkinter GUI, recording, the Prompt→Record→Analyze→Feedback→Loop state machine, threading orchestration, LLM-server subprocess management.
-- [`pronounce/speech.py`](pronounce/speech.py) — pronunciation analysis core. Single entry point `analyze(user_audio, expected_text, reference_audio) -> PronunciationResult`. Wav2Vec2 embeddings + per-step cosine DTW, phoneme/word error rates, prosody. Scoring uses a calibratable acoustic floor (`pronounce/calibration.json` overrides `config.PRONUNCE_ACOUSTIC_GOOD`); every attempt's raw components are appended to `logs/pronounce_samples.jsonl`. No GUI/Tkinter dependency.
+- [`pronounce/speech.py`](pronounce/speech.py) — pronunciation analysis core. Single entry point `analyze(user_audio, expected_text, reference_audio) -> PronunciationResult`. Wav2Vec2 embeddings + per-step cosine DTW, phoneme/word error rates, prosody. Scoring uses a calibratable acoustic floor (`pronounce/calibration.json` overrides `config.PRONUNCIATION_ACOUSTIC_GOOD`); every attempt's raw components are appended to `logs/pronounce_samples.jsonl`. No GUI/Tkinter dependency.
 - [`pronounce/calibrate.py`](pronounce/calibrate.py) — on-request semi-automatic calibration: fits the acoustic floor from collected samples and writes `pronounce/calibration.json` (`--dry-run` to preview).
-- [`tts.py`](tts.py) — `TTSManager`: Kokoro TTS. `synthesize()` returns the waveform; `play_array(waveform, sample_rate)` plays any waveform; `play_stream()` is a convenience wrapper.
-- [`stt.py`](stt.py) — `STTManager`: faster-whisper STT with VAD. Loaded at startup and warmed up, but the practice loop transcribes via Wav2Vec2-CTC inside `pronounce/`.
+- [`tts.py`](tts.py) — `TTSManager`: Kokoro TTS. `synthesize()` returns the waveform; `play_array(waveform, sample_rate)` plays any waveform. Also exports `reset_portaudio()` (shared PortAudio reset used by recording and playback).
+- [`stt.py`](stt.py) — `STTManager`: faster-whisper STT with VAD. Currently disabled — main.py does not import or load it; the practice loop transcribes via Wav2Vec2-CTC inside `pronounce/`. Kept for possible re-enabling.
 - [`llm.py`](llm.py) — `LLMManager`: OpenAI-compatible client. `generate_phrase()` produces one practice phrase per request (non-streaming).
 - [`config.py`](config.py) — all configuration (device, model names, score threshold, practice-text path, phrase-generation settings, audio settings).
 - [`llm_server/server.py`](llm_server/server.py) — standalone FastAPI server loading GGUF via `llama_cpp`; runs as a separate process to avoid GPU contention.

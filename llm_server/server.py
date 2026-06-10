@@ -47,7 +47,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
-app = FastAPI(title="SpeakLoop LLM Server", version="1.0.0")
+app = FastAPI(title="EchoLoop LLM Server", version="1.0.0")
 
 # Global model state.
 # _inference_lock serialises all inference calls — llama_cpp is not thread-safe.
@@ -110,10 +110,14 @@ def _load_model(model_path: str, n_gpu_layers: int, n_ctx: int, verbose: bool = 
 
 # ── SSE helpers ───────────────────────────────────────────────────────────────
 
-def _make_sse_chunk(content: str, finish_reason: Optional[str] = None) -> str:
-    """Format a single SSE data line in OpenAI streaming format."""
+def _make_sse_chunk(chunk_id: str, content: str, finish_reason: Optional[str] = None) -> str:
+    """Format a single SSE data line in OpenAI streaming format.
+
+    ``chunk_id`` is generated once per stream — OpenAI clients expect every
+    chunk of one completion to share the same id.
+    """
     payload = {
-        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        "id": chunk_id,
         "object": "chat.completion.chunk",
         "choices": [{
             "index": 0,
@@ -130,10 +134,11 @@ def _stream_chat(request: ChatCompletionRequest) -> Iterator[str]:
     This prevents concurrent inference calls and model reloads mid-stream.
     """
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    chunk_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"  # one id for the whole stream
 
     with _inference_lock:
         if _model is None:
-            yield _make_sse_chunk("", finish_reason="stop")
+            yield _make_sse_chunk(chunk_id, "", finish_reason="stop")
             yield "data: [DONE]\n\n"
             return
 
@@ -150,7 +155,7 @@ def _stream_chat(request: ChatCompletionRequest) -> Iterator[str]:
                 delta = chunk["choices"][0]["delta"]
                 content = delta.get("content", "")
                 finish_reason = chunk["choices"][0].get("finish_reason")
-                yield _make_sse_chunk(content, finish_reason)
+                yield _make_sse_chunk(chunk_id, content, finish_reason)
             except (KeyError, IndexError):
                 continue
 
@@ -242,14 +247,21 @@ def reload_model(req: ModelLoadRequest):
             _load_model(req.model_path, req.n_gpu_layers, req.n_ctx)
         return {"status": "loaded", "model_path": req.model_path}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        # _load_model unloads the old model before loading the new one (two
+        # models may not fit in VRAM simultaneously), so a failed reload leaves
+        # the server with no model at all — say so explicitly.
+        raise HTTPException(
+            status_code=500,
+            detail=f"Reload failed and the server now has NO model loaded "
+                   f"(POST /v1/model/load again): {exc}",
+        )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="SpeakLoop local LLM server (OpenAI-compatible)"
+        description="EchoLoop local LLM server (OpenAI-compatible)"
     )
     parser.add_argument("--model", type=str, default=None,
                         help="Path to GGUF model file (optional at startup)")

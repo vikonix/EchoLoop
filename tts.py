@@ -42,6 +42,23 @@ KOKORO_WARMUP_WORDS = {
 }
 
 
+def reset_portaudio():
+    """Fully reinitialize PortAudio before opening a stream.
+
+    Heals HDMI/NVIDIA device disconnects caused by CUDA power-state transitions
+    on Windows. sd._terminate/_initialize are *not* public sounddevice API
+    (present in 0.4.x/0.5.x); if an upgrade removes them this degrades to a
+    logged no-op and the reset can simply be dropped. Call only while holding
+    config.AUDIO_LOCK and with no other stream open — the reset invalidates
+    every existing PortAudio stream in the process.
+    """
+    try:
+        sd._terminate()
+        sd._initialize()
+    except Exception as init_err:
+        logging.debug(f"PortAudio reinitialization error: {init_err}")
+
+
 class TTSManager:
     def __init__(self):
         self.model = None
@@ -123,8 +140,11 @@ class TTSManager:
             return
 
         try:
-            # Windows-only robust winsound implementation (bypasses PortAudio MME error 6).
-            if WINSOUND_AVAILABLE:
+            # Windows-only robust winsound implementation (bypasses PortAudio MME
+            # error 6). winsound can only target the default output device, so an
+            # explicit AUDIO_OUTPUT_DEVICE forces the sounddevice path below —
+            # otherwise that config option would be silently ignored on Windows.
+            if WINSOUND_AVAILABLE and config.AUDIO_OUTPUT_DEVICE is None:
                 # Normalise peak to avoid clipping.
                 peak = np.max(np.abs(full_audio))
                 if peak > 0:
@@ -156,15 +176,8 @@ class TTSManager:
             if full_audio.ndim == 1:
                 full_audio = full_audio.reshape(-1, 1)
 
-            # Open the stream with a full PortAudio reset to heal HDMI/NVIDIA driver
-            # disconnects caused by CUDA power-state transitions on Windows.
             with config.AUDIO_LOCK:
-                try:
-                    sd._terminate()
-                    sd._initialize()
-                except Exception as init_err:
-                    logging.debug(f"PortAudio reinitialization error: {init_err}")
-
+                reset_portaudio()
                 stream = sd.OutputStream(
                         samplerate=sample_rate,
                         channels=config.AUDIO_CHANNELS,
@@ -173,7 +186,11 @@ class TTSManager:
                         latency=config.AUDIO_LATENCY,
                         device=config.AUDIO_OUTPUT_DEVICE,
                 )
-                stream.start()
+                try:
+                    stream.start()
+                except Exception:
+                    stream.close()  # don't leak the never-started stream
+                    raise
 
             try:
                 chunk_size = 1024

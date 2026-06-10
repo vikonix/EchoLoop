@@ -11,8 +11,12 @@ import logging
 import tkinter as tk
 from tkinter import ttk
 from tkinter import scrolledtext
+from typing import TYPE_CHECKING
 
 import config
+
+if TYPE_CHECKING:  # only for the _show_feedback annotation; no runtime import
+    import pronounce
 
 # Phrase-length selector labels. The label maps to generate_phrase's ``length``
 # mode: LENGTH_FULL → "full" sentence, LENGTH_FEW_WORDS → "fragment".
@@ -83,7 +87,7 @@ class PronunciationTrainerUI:
         self.status_label.pack(side=tk.LEFT, padx=15, pady=4)
 
         self.stats_label = tk.Label(self.status_bar,
-                                    text=f"Last score: -- | Pass ≥ {config.PRONUNCE_SCORE_THRESHOLD:.0f}",
+                                    text=f"Last score: -- | Pass ≥ {config.PRONUNCIATION_SCORE_THRESHOLD:.0f}",
                                     font=("Segoe UI", 9), fg="#a0a0a5", bg="#1a1a1e")
         self.stats_label.pack(side=tk.RIGHT, padx=15, pady=4)
 
@@ -245,6 +249,9 @@ class PronunciationTrainerUI:
         self.feedback_display.tag_configure("mono", foreground="#a0a0a5", font=("Consolas", 10))
         # Amber tag for "no word errors but score still low" guidance.
         self.feedback_display.tag_configure("warn", foreground="#ffb86c", font=("Segoe UI", 11))
+        # Red tag for error messages (append_error_msg); non-bold so the score
+        # line ("bad" tag) still stands out above errors.
+        self.feedback_display.tag_configure("error", foreground="#ff5555", font=("Segoe UI", 10))
 
     def draw_mic_button(self, state):
         self.btn_canvas.delete("all")
@@ -268,10 +275,26 @@ class PronunciationTrainerUI:
     # Feedback / status helpers (always called on the main thread)
     # ------------------------------------------------------------------
     def append_system_msg(self, text: str):
-        # System messages are intentionally kept out of the on-screen feedback
-        # panel so it stays focused on pronunciation feedback. They are still
-        # written to the log file for diagnostics.
+        """Log a progress/status message.
+
+        Intentionally *not* shown in the feedback panel: routine progress
+        ("Loading models...", "New phrase: ...") would drown out the
+        pronunciation feedback. Only errors appear on screen — see
+        append_error_msg.
+        """
         logging.info(f"[System] {text}")
+
+    def append_error_msg(self, text: str):
+        """Show an error in the feedback panel (in red) and log it.
+
+        Errors like "Audio is too short" or "LM Studio is offline" must reach
+        the user, not only the log file.
+        """
+        logging.warning(f"[Error] {text}")
+        self.feedback_display.configure(state=tk.NORMAL)
+        self.feedback_display.insert(tk.END, f"{text}\n", "error")
+        self.feedback_display.configure(state=tk.DISABLED)
+        self.feedback_display.see(tk.END)
 
     def update_status(self, text: str, color: str = "#a0a0a5"):
         self.status_label.configure(text=f"Status: {text}", fg=color)
@@ -281,7 +304,7 @@ class PronunciationTrainerUI:
 
     def update_score_stats(self, score: float):
         self.stats_label.configure(
-            text=f"Last score: {score:.0f} | Pass ≥ {config.PRONUNCE_SCORE_THRESHOLD:.0f}")
+            text=f"Last score: {score:.0f} | Pass ≥ {config.PRONUNCIATION_SCORE_THRESHOLD:.0f}")
 
     # ------------------------------------------------------------------
     # Prosody drawing
@@ -381,9 +404,12 @@ class PronunciationTrainerUI:
 
         self.update_score_stats(result.score)
 
-        # Replay buttons available now that we have both signals.
+        # Re-enable everything disabled while recording: replay buttons (both
+        # signals exist now), the self-test and new-phrase generation.
         self.ref_btn.config(state=tk.NORMAL)
         self.user_btn.config(state=tk.NORMAL)
+        self.test_btn.config(state=tk.NORMAL)
+        self.generate_btn.config(state=tk.NORMAL)
         self.draw_mic_button("idle")
 
         if result.passed:

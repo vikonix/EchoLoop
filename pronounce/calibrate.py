@@ -19,8 +19,10 @@ The ceiling needs no calibration: it is derived per utterance from the
 random-pair baseline (see speech.acoustic_bad_for).
 """
 
+import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +39,10 @@ MAX_PHONEME_ERROR_RATE = 0.25
 SELF_TEST_ACOUSTIC = 0.02
 MIN_SAMPLES = 5
 FLOOR_PERCENTILE = 10
+# Only the most recent samples are used: the log grows without bound, and old
+# sessions (different microphone placement, different voice habits) would skew
+# the floor away from the current setup.
+MAX_SAMPLES_USED = 300
 
 
 def load_samples() -> list:
@@ -55,18 +61,36 @@ def load_samples() -> list:
 
 
 def main() -> int:
-    dry_run = "--dry-run" in sys.argv[1:]
+    parser = argparse.ArgumentParser(
+        description="Calibrate the acoustic scoring floor from session samples.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="only show what would change, do not write calibration.json")
+    parser.add_argument("--voice", default=None,
+                        help="only use samples recorded with this Kokoro voice "
+                             "(the acoustic floor is voice-specific)")
+    args = parser.parse_args()
 
-    samples = load_samples()
+    samples = load_samples()[-MAX_SAMPLES_USED:]
+    if args.voice:
+        samples = [s for s in samples if s.get("voice") == args.voice]
+
     good = [s for s in samples
             if s.get("acoustic_per_step", 0) >= SELF_TEST_ACOUSTIC
             and s.get("word_error_rate", 1) <= MAX_WORD_ERROR_RATE
             and s.get("phoneme_error_rate", 1) <= MAX_PHONEME_ERROR_RATE]
 
     print(f"Samples file:   {speech.SAMPLES_FILE}")
-    print(f"Total samples:  {len(samples)}")
+    print(f"Total samples:  {len(samples)} (last {MAX_SAMPLES_USED} max"
+          + (f", voice={args.voice}" if args.voice else "") + ")")
     print(f"Good attempts:  {len(good)} (word_err<={MAX_WORD_ERROR_RATE}, "
           f"phoneme_err<={MAX_PHONEME_ERROR_RATE}, excluding self-tests)")
+
+    # The floor depends on the reference voice; mixing several voices blurs it.
+    voices = Counter(s.get("voice") or "<unknown>" for s in good)
+    if len(voices) > 1:
+        listing = ", ".join(f"{v}: {n}" for v, n in voices.most_common())
+        print(f"WARNING: samples mix several voices ({listing}). "
+              f"Consider rerunning with --voice <name> for a tighter floor.")
 
     if len(good) < MIN_SAMPLES:
         print(f"\nNot enough good attempts (need {MIN_SAMPLES}). Practice a few "
@@ -96,11 +120,12 @@ def main() -> int:
     print(f"Median score of good attempts: {np.median(before):.1f} -> {np.median(after):.1f} "
           f"(pass threshold: {speech.SCORE_THRESHOLD})")
 
-    if dry_run:
+    if args.dry_run:
         print("\nDry run: calibration.json not written.")
         return 0
 
-    speech.save_calibration(new_floor, extra={"samples_used": len(good)})
+    speech.save_calibration(new_floor, extra={"samples_used": len(good),
+                                              "voice": args.voice})
     print(f"\nWritten {speech.CALIBRATION_FILE}. Restart the app (or it picks the "
           "value up on next launch) to score with the new floor.")
     return 0

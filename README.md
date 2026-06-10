@@ -133,7 +133,7 @@ Key options in [`config.py`](config.py):
 |---|---|---|
 | `WAV2VEC2_MODEL_NAME` | `facebook/wav2vec2-large-960h` | Pronunciation/transcription model. |
 | `WAV2VEC2_DEVICE` | `DEVICE` (cuda/cpu) | Set to `"cpu"` to avoid VRAM contention with llama_cpp / Kokoro. |
-| `PRONUNCE_SCORE_THRESHOLD` | `70.0` | Score (0–100) required to pass a phrase. |
+| `PRONUNCIATION_SCORE_THRESHOLD` | `70.0` | Score (0–100) required to pass a phrase. |
 | `PRACTICE_TEXT_FILE` | `practice_text.txt` | Source text pre-loaded into the input panel. |
 | `PHRASE_GEN_TEMPERATURE` / `PHRASE_GEN_MAX_TOKENS` | `0.7` / `40` | Phrase-generation sampling. |
 | `PHRASE_GEN_RECENT_MEMORY` | `5` | How many recent phrases are sent back to the model to avoid repeats. |

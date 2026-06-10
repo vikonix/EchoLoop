@@ -69,18 +69,15 @@ class TestPureLogic(unittest.TestCase):
             0.3, 8 / 40, 12 / 60, acoustic_bad=0.6, acoustic_good=0.2)
         self.assertEqual(short, long)
 
-    def test_phoneme_embeddings_shape_and_values(self):
-        emb = speech.get_phoneme_embeddings("ab")
-        self.assertEqual(emb.shape, (2, 1))
-        self.assertEqual(emb[0][0], ord("a"))
-        self.assertEqual(emb[1][0], ord("b"))
-
-    def test_align_sequences_dtw_returns_equal_length(self):
-        seq1 = [[1.0], [2.0], [3.0], [4.0]]
-        seq2 = [[1.0], [4.0]]
-        aligned1, aligned2 = speech.align_sequences_dtw(seq1, seq2)
-        self.assertEqual(len(aligned1), len(aligned2))
-        self.assertGreater(len(aligned1), 0)
+    def test_random_pair_baseline_handles_empty_embeddings(self):
+        # Near-empty audio yields zero embedding frames; the baseline must fall
+        # back to the fixed ceiling instead of crashing on integers(0, 0).
+        empty = np.zeros((0, 4), dtype=np.float32)
+        frames = np.ones((5, 4), dtype=np.float32)
+        self.assertEqual(speech._random_pair_baseline(empty, frames),
+                         speech.ACOUSTIC_BAD_DEFAULT)
+        self.assertEqual(speech._random_pair_baseline(frames, empty),
+                         speech.ACOUSTIC_BAD_DEFAULT)
 
     def test_clean_transcription_normalises_text(self):
         self.assertEqual(speech.clean_transcription("  Hello, WORLD!! "), "hello world")

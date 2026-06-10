@@ -34,11 +34,19 @@ _CACHED_REPOS = (
 
 
 def _all_models_cached() -> bool:
-    """True only when every networked model already exists in the local cache."""
+    """True only when every networked model already exists in the local cache.
+
+    Besides a non-empty snapshots dir, the blobs dir must hold no *.incomplete
+    files — those are partial downloads left by an interrupted first run, and
+    flipping to offline mode with one present would crash model loading.
+    """
     hub_dir = Path(os.environ["HF_HOME"]) / "hub"
     for repo in _CACHED_REPOS:
-        snapshots = hub_dir / ("models--" + repo.replace("/", "--")) / "snapshots"
+        repo_dir = hub_dir / ("models--" + repo.replace("/", "--"))
+        snapshots = repo_dir / "snapshots"
         if not snapshots.is_dir() or not any(snapshots.iterdir()):
+            return False
+        if any(repo_dir.glob("blobs/*.incomplete")):
             return False
     return True
 
@@ -189,13 +197,13 @@ WAV2VEC2_MODEL_NAME = "facebook/wav2vec2-large-960h"
 WAV2VEC2_DEVICE = DEVICE
 # Score (0-100) at or above which a repetition is accepted; below it the learner
 # is asked to repeat the same phrase.
-PRONUNCE_SCORE_THRESHOLD = 70.0
+PRONUNCIATION_SCORE_THRESHOLD = 70.0
 # Acoustic floor: typical per-step cosine DTW distance of a *good* attempt
 # (the user's voice never matches the TTS voice exactly, so this is > 0). This
 # is only the pre-calibration default — after a practice session run
 # ``python pronounce/calibrate.py`` and the value it writes to
 # pronounce/calibration.json takes precedence (tuned to your voice and mic).
-PRONUNCE_ACOUSTIC_GOOD = 0.20
+PRONUNCIATION_ACOUSTIC_GOOD = 0.20
 
 # =====================================================================
 # Practice Text & Phrase Generation

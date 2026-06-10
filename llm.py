@@ -111,10 +111,18 @@ class LLMManager:
         When ``fragment`` is True the result is a sentence fragment, so any
         trailing sentence-ending punctuation the model added is removed.
         """
-        text = text.strip().strip('"').strip("'").strip()
+        # Strip wrapping quotes, including typographic ones the model may emit.
+        text = text.strip().strip('"\'«»“”‘’').strip()
         # Drop a leading list marker like "1." or "- " if the model adds one.
         text = re.sub(r"^\s*(?:\d+[.)]|[-*])\s*", "", text)
         text = " ".join(text.split()).strip()
         if fragment:
             text = text.rstrip(".!?").strip()
+        else:
+            # The model occasionally returns several sentences despite the
+            # prompt; keep only the first one. Split on end punctuation followed
+            # by an uppercase letter so "1.5" or rare abbreviations survive.
+            parts = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text)
+            if len(parts) > 1:
+                text = parts[0].strip()
         return text

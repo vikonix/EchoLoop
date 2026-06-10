@@ -22,7 +22,7 @@ import config
 # loaded and no VRAM/start-up time is spent on it. Transcription is done by
 # Wav2Vec2 in pronounce/. Re-enable by importing STTManager from stt again.
 from llm import LLMManager
-from tts import TTSManager, KOKORO_SAMPLE_RATE
+from tts import TTSManager, KOKORO_SAMPLE_RATE, reset_portaudio
 import pronounce
 from ui import PronunciationTrainerUI, LENGTH_FEW_WORDS
 
@@ -147,7 +147,11 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         # Application readiness and per-phrase practice state
         self.app_ready = False
         self.is_generating = False
+        self._closing = False  # guards quit_app against double invocation
         self.current_phrase: Optional[str] = None
+        # Kokoro voice the current reference was synthesized with (logged with
+        # every analysis sample — the acoustic calibration is voice-specific).
+        self.current_voice: str = config.KOKORO_VOICE
         self.reference_audio: Optional[np.ndarray] = None   # 24 kHz Kokoro output
         self.last_user_audio: Optional[np.ndarray] = None   # 16 kHz recorded attempt
         self.recent_phrases: List[str] = []
@@ -243,7 +247,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
                 self.root.after(0, self.append_system_msg, f"Starting LLM server with {model_name}...")
                 self.root.after(0, self.update_status, "Starting LLM server...", "#ffb86c")
                 if not self._start_llm_server():
-                    self.root.after(0, self.append_system_msg, "Error: LLM server failed to start. Check model path and GPU memory.")
+                    self.root.after(0, self.append_error_msg, "Error: LLM server failed to start. Check model path and GPU memory.")
                     self.root.after(0, self.update_status, "LLM Server Error", "#ff5555")
                     self.root.after(0, self.update_instruction, "LLM server failed to start. Check the log and restart.")
                     return
@@ -251,7 +255,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
             else:
                 self.llm_mgr.init_client()
                 if not self.llm_mgr.check_connection():
-                    self.root.after(0, self.append_system_msg, "Warning: LM Studio is offline. Start it to generate phrases!")
+                    self.root.after(0, self.append_error_msg, "Warning: LM Studio is offline. Start it to generate phrases!")
 
             self.root.after(0, self.update_status, "Warming up models...", "#ffb86c")
             self.tts_mgr.warm_up()
@@ -264,7 +268,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
 
         except Exception as e:
             logging.exception("Error during initialization thread:")
-            self.root.after(0, self.append_system_msg, f"Initialization Error: {e}")
+            self.root.after(0, self.append_error_msg, f"Initialization Error: {e}")
             self.root.after(0, self.update_status, "Initialization Failed", "#ff5555")
 
     def load_practice_text(self):
@@ -339,7 +343,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         # Read the editable source text on the main thread (Tk is not thread-safe).
         source_text = self.source_text.get("1.0", tk.END).strip()
         if not source_text:
-            self.append_system_msg("Please enter some practice text first.")
+            self.append_error_msg("Please enter some practice text first.")
             return
 
         self.is_generating = True
@@ -365,12 +369,16 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
                 return
 
             # Synthesize the reference once; reused for playback and analysis.
-            reference_audio = self.tts_mgr.synthesize(phrase, voice=self._selected_voice())
+            # Capture the voice in a local first so the phrase, audio and voice
+            # stored below are guaranteed consistent with each other.
+            voice = self._selected_voice()
+            reference_audio = self.tts_mgr.synthesize(phrase, voice=voice)
             if reference_audio.size == 0:
                 self.root.after(0, self._phrase_generation_failed, "Could not synthesize the reference audio.")
                 return
 
             self.current_phrase = phrase
+            self.current_voice = voice
             self.reference_audio = reference_audio
             if DEBUG_DUMP_RECORDINGS:
                 self._dump_record_wav(reference_audio, RECORD_MODEL_FILE, KOKORO_SAMPLE_RATE)
@@ -408,7 +416,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
 
     def _phrase_generation_failed(self, message: str):
         self.is_generating = False
-        self.append_system_msg(message)
+        self.append_error_msg(message)
         self.draw_mic_button("idle")
         self.update_status("Ready", "#00e676")
         self.update_instruction("Click 'New phrase' to try again.")
@@ -454,6 +462,14 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
             self.stop_playback()  # silence any reference playback before recording
             self.is_recording = True
             self.recorded_chunks = []
+            # Lock out every playback/diagnostic action for the duration of the
+            # take: playing the reference (or the previous attempt) into an open
+            # microphone would end up inside the recording and corrupt analysis.
+            # Re-enabled in _show_feedback / _reset_to_retry.
+            self.generate_btn.config(state=tk.DISABLED)
+            self.ref_btn.config(state=tk.DISABLED)
+            self.user_btn.config(state=tk.DISABLED)
+            self.test_btn.config(state=tk.DISABLED)
             self.root.after(0, self.draw_mic_button, "recording")
             self.root.after(0, self.update_status, "Recording...", "#ff5555")
             self.root.after(0, self.update_instruction, "Release when finished speaking.")
@@ -467,22 +483,40 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
             logging.info("Stopping audio recording...")
             self.is_recording = False
 
+        # Claim the analysis slot *synchronously, before* spawning the worker.
+        # Claiming it inside the worker left a gap in which a 'New phrase' click
+        # could pass the is_processing_audio check and replace current_phrase /
+        # reference_audio mid-analysis (feedback against the wrong phrase).
+        with self.processing_lock:
+            if self.is_processing_audio:
+                logging.warning("Analysis already running, skipping duplicate take.")
+                return
+            self.is_processing_audio = True
+
         self.root.after(0, self.draw_mic_button, "processing")
         self.root.after(0, self.update_status, "Analyzing pronunciation...", "#ffb86c")
         threading.Thread(target=self._finalize_recording, daemon=True).start()
 
     def _finalize_recording(self):
-        """Join the record thread, then run analysis — off the main thread."""
-        if self.record_thread:
-            self.record_thread.join(timeout=RECORD_THREAD_JOIN_TIMEOUT_SEC)
+        """Join the record thread, then run analysis — off the main thread.
 
-        with self.processing_lock:
-            if self.is_processing_audio:
-                logging.warning("Analysis already running, skipping duplicate.")
-                return
-            self.is_processing_audio = True
-
+        The is_processing_audio slot was claimed by trigger_recording_stop and
+        is always released here, whatever happens.
+        """
         try:
+            if self.record_thread:
+                self.record_thread.join(timeout=RECORD_THREAD_JOIN_TIMEOUT_SEC)
+                if self.record_thread.is_alive():
+                    # The capture thread is stuck (e.g. the device hangs on
+                    # close) and its callback may still be appending chunks.
+                    # Reading them now would race the writer — drop the take.
+                    logging.warning(
+                        f"Record thread still alive after {RECORD_THREAD_JOIN_TIMEOUT_SEC}s; "
+                        "discarding this take to avoid reading a buffer being written to.")
+                    self.root.after(0, self.append_error_msg,
+                                    "Audio device did not stop in time — take discarded, please try again.")
+                    self.root.after(0, self._reset_to_retry)
+                    return
             self.analyze_recording()
         finally:
             with self.processing_lock:
@@ -534,12 +568,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
 
         try:
             with config.AUDIO_LOCK:
-                try:
-                    sd._terminate()
-                    sd._initialize()
-                except Exception as init_err:
-                    logging.debug(f"PortAudio reinitialization error: {init_err}")
-
+                reset_portaudio()
                 stream = sd.InputStream(
                         samplerate=self.capture_sr,
                         channels=config.AUDIO_CHANNELS,
@@ -551,7 +580,11 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
                         device=capture_device,
                         callback=callback,
                 )
-                stream.start()
+                try:
+                    stream.start()
+                except Exception:
+                    stream.close()  # don't leak the never-started stream
+                    raise
 
             try:
                 while True:
@@ -565,9 +598,12 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
 
                     if time.time() - start_time >= config.MAX_RECORD_SECONDS:
                         logging.info("Maximum recording duration reached.")
-                        self.root.after(0, self.append_system_msg, "Reached maximum record limit.")
-                        with self.record_lock:
-                            self.is_recording = False
+                        self.root.after(0, self.append_error_msg, "Reached maximum record limit — take cut off.")
+                        # Route through the normal stop path (on the main thread) so
+                        # the take is finalized and analyzed exactly like a manual
+                        # stop; flipping is_recording directly here used to leave
+                        # the take unanalyzed and the UI stuck in recording state.
+                        self.root.after(0, self.trigger_recording_stop)
                         break
 
                     time.sleep(0.01)
@@ -583,6 +619,10 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
             logging.exception("Recording InputStream error:")
             with self.record_lock:
                 self.is_recording = False
+            # Re-enable the buttons disabled at recording start (without this a
+            # failed stream open would leave the whole UI locked), then show the
+            # error status on top of the reset's default "Ready".
+            self.root.after(0, self._reset_to_retry)
             self.root.after(0, self.update_status, "Recording Error", "#ff5555")
 
     def normalize_audio(self, audio: np.ndarray) -> np.ndarray:
@@ -644,6 +684,9 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
             return
         if self.current_phrase is None or self.reference_audio is None:
             return
+        with self.record_lock:
+            if self.is_recording:
+                return  # never play the reference into an open microphone
         with self.processing_lock:
             if self.is_processing_audio:
                 return
@@ -672,11 +715,12 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
                 reference_audio=self.reference_audio,
                 user_sr=KOKORO_SAMPLE_RATE,       # reference is Kokoro's 24 kHz output
                 reference_sr=KOKORO_SAMPLE_RATE,
+                voice=self.current_voice,
             )
             self.root.after(0, self._show_feedback, result)
         except Exception:
             logging.exception("Reference self-test error:")
-            self.root.after(0, self.append_system_msg, "Reference test failed.")
+            self.root.after(0, self.append_error_msg, "Reference test failed.")
             self.root.after(0, self._reset_to_retry)
         finally:
             with self.processing_lock:
@@ -687,7 +731,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
             audio = self.get_recorded_audio()
             if audio is None or len(audio) < config.AUDIO_SAMPLE_RATE * 0.2:
                 logging.warning("Captured audio too short or empty.")
-                self.root.after(0, self.append_system_msg, "Audio is too short. Hold the mic longer and try again.")
+                self.root.after(0, self.append_error_msg, "Audio is too short. Hold the mic longer and try again.")
                 self.root.after(0, self._reset_to_retry)
                 return
 
@@ -701,7 +745,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
                 self._dump_record_wav(audio, RECORD_NORMALIZED_FILE, config.AUDIO_SAMPLE_RATE)
 
             if self.current_phrase is None or self.reference_audio is None:
-                self.root.after(0, self.append_system_msg, "No active phrase to compare against.")
+                self.root.after(0, self.append_error_msg, "No active phrase to compare against.")
                 self.root.after(0, self._reset_to_retry)
                 return
 
@@ -723,6 +767,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
                 reference_audio=self.reference_audio,
                 user_sr=config.AUDIO_SAMPLE_RATE,
                 reference_sr=KOKORO_SAMPLE_RATE,
+                voice=self.current_voice,
             )
             elapsed_ms = (time.perf_counter() - analyze_start) * 1000
             logging.info(f"Pronunciation analysis done in {elapsed_ms:.0f}ms. Score={result.score}")
@@ -731,17 +776,26 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
 
         except Exception:
             logging.exception("Error in analyze_recording:")
-            self.root.after(0, self.append_system_msg, "Analysis error. Please try again.")
+            self.root.after(0, self.append_error_msg, "Analysis error. Please try again.")
             self.root.after(0, self._reset_to_retry)
 
     def _reset_to_retry(self):
-        """Return to a state where the user can record the current phrase again."""
+        """Return to a state where the user can record the current phrase again.
+
+        Also re-enables the buttons disabled while recording, according to what
+        is actually available (phrase / last recording).
+        """
         self.draw_mic_button("idle")
         self.update_status("Ready", "#00e676")
+        self.generate_btn.config(state=tk.NORMAL)
         if self.current_phrase:
+            self.ref_btn.config(state=tk.NORMAL)
+            self.test_btn.config(state=tk.NORMAL)
             self.update_instruction("Hold SPACE or click the mic to repeat the phrase.")
         else:
             self.update_instruction("Click 'New phrase' to begin.")
+        if self.last_user_audio is not None and self.last_user_audio.size > 0:
+            self.user_btn.config(state=tk.NORMAL)
 
     # ------------------------------------------------------------------
     # Playback (reference / own recording)
@@ -792,9 +846,19 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
     # Shutdown
     # ------------------------------------------------------------------
     def quit_app(self):
+        if self._closing:
+            return  # Escape and the window-close button can both land here
+        self._closing = True
         logging.info("Shutting down EchoLoop...")
         self.shutdown_event.set()
         self.stop_playback()
+
+        # Stop a recording in progress so the capture thread exits its loop and
+        # closes the input stream before the process goes away.
+        with self.record_lock:
+            self.is_recording = False
+        if self.record_thread is not None and self.record_thread.is_alive():
+            self.record_thread.join(timeout=RECORD_THREAD_JOIN_TIMEOUT_SEC)
 
         if self._llm_server_process is not None:
             logging.info("Terminating LLM server subprocess...")
@@ -808,14 +872,14 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         if self._llm_server_log_file is not None:
             self._llm_server_log_file.close()
 
-        for handler in logging.root.handlers[:]:
-            handler.close()
-            logging.root.removeHandler(handler)
-        logging.shutdown()
         self.root.destroy()
 
     def run(self):
         self.root.mainloop()
+        # Flush and close log handlers only after the UI (and quit_app) is done.
+        # Closing them inside quit_app produced 'I/O operation on closed file'
+        # noise from daemon threads still logging during the shutdown itself.
+        logging.shutdown()
 
 
 if __name__ == "__main__":

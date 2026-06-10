@@ -25,6 +25,7 @@ import json
 import logging
 import re
 import sys
+import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
 from datetime import datetime
@@ -36,7 +37,7 @@ import torch
 import librosa
 import Levenshtein
 from fastdtw import fastdtw
-from scipy.spatial.distance import cosine, euclidean
+from scipy.spatial.distance import cosine
 from sklearn.preprocessing import MinMaxScaler
 from transformers import Wav2Vec2Processor, Wav2Vec2Model, Wav2Vec2ForCTC
 from phonemizer import phonemize
@@ -50,23 +51,24 @@ import config
 
 
 # =====================================================================
-# Configuration (read from config.py with safe fallbacks so this module
-# stays usable even before config.py gains pronunciation-specific keys)
+# Configuration. Read via direct attribute access on purpose: config.py
+# always defines these keys, and getattr-with-fallback would silently
+# mask a typo in either file (it did once — see PRONUNCIATION_*).
 # =====================================================================
 # Wav2Vec2 expects strictly 16 kHz mono input.
 TARGET_SAMPLE_RATE = 16_000
 # Kokoro synthesises at 24 kHz; used as the default reference sample rate.
 KOKORO_SAMPLE_RATE = 24_000
 
-MODEL_NAME = getattr(config, "WAV2VEC2_MODEL_NAME", "facebook/wav2vec2-large-960h")
-# Default device follows config.DEVICE (cuda/cpu); overridable via config.WAV2VEC2_DEVICE.
-DEVICE = getattr(config, "WAV2VEC2_DEVICE", config.DEVICE)
+MODEL_NAME = config.WAV2VEC2_MODEL_NAME
+# Device for Wav2Vec2 (cuda/cpu); config.WAV2VEC2_DEVICE follows config.DEVICE.
+DEVICE = config.WAV2VEC2_DEVICE
 # Score (0-100) at or above which a repetition is considered acceptable.
-SCORE_THRESHOLD = getattr(config, "PRONUNCE_SCORE_THRESHOLD", 70.0)
+SCORE_THRESHOLD = config.PRONUNCIATION_SCORE_THRESHOLD
 # espeak dialect ("en-us"/"en-gb") used to phonemize the reference text. Follows
 # the accent selected in config so British speech is scored against British
 # phonemes (and American against American), not always en-us.
-ESPEAK_LANGUAGE = getattr(config, "ESPEAK_LANGUAGE", "en-us")
+ESPEAK_LANGUAGE = config.ESPEAK_LANGUAGE
 
 # ---------------------------------------------------------------------
 # Acoustic score calibration.
@@ -82,7 +84,7 @@ ESPEAK_LANGUAGE = getattr(config, "ESPEAK_LANGUAGE", "en-us")
 #     distance between unaligned frames of the two recordings), so it adapts to
 #     each phrase without manual tuning.
 # ---------------------------------------------------------------------
-ACOUSTIC_GOOD_DEFAULT = float(getattr(config, "PRONUNCE_ACOUSTIC_GOOD", 0.20))
+ACOUSTIC_GOOD_DEFAULT = float(config.PRONUNCIATION_ACOUSTIC_GOOD)
 ACOUSTIC_BAD_DEFAULT = 0.60      # fixed ceiling when no per-utterance baseline exists
 ACOUSTIC_BAD_FRACTION = 0.9      # ceiling = this fraction of the random-pair baseline
 ACOUSTIC_MIN_SPAN = 0.05         # minimal floor-to-ceiling span (avoids degenerate scale)
@@ -91,7 +93,7 @@ TRIM_TOP_DB = 30                 # silence trim threshold relative to peak, in d
 # Persisted calibration (floor override) and the per-attempt sample log used by
 # pronounce/calibrate.py to compute that override on request.
 CALIBRATION_FILE = Path(__file__).resolve().parent / "calibration.json"
-SAMPLES_FILE = Path(getattr(config, "LOG_DIR", _ROOT / "logs")) / "pronounce_samples.jsonl"
+SAMPLES_FILE = Path(config.LOG_DIR) / "pronounce_samples.jsonl"
 
 
 def _load_calibration() -> float:
@@ -302,16 +304,11 @@ def get_phonemes_with_word_mapping(text: str):
     return phonemes, phoneme_to_word
 
 
-def get_phoneme_embeddings(phoneme_seq: str) -> np.ndarray:
-    """Convert a phoneme string into a numerical column vector (ord per char)."""
-    return np.array([ord(p) for p in phoneme_seq]).reshape(-1, 1)
-
-
 def compare_transcriptions(transcription: str, text_reference: str) -> Dict[str, Any]:
     """Compare an ASR transcription against the expected text.
 
     Identifies per-word pronunciation errors via phoneme alignment and returns
-    distances used by the scoring formula plus contours for optional plotting.
+    the distances used by the scoring formula.
     """
     transcription_clean = transcription.lower().strip()
     reference_clean = text_reference.lower().strip()
@@ -326,14 +323,14 @@ def compare_transcriptions(transcription: str, text_reference: str) -> Dict[str,
     expected_phonemes = [p for _word, word_phonemes in expected_pairs for p in word_phonemes]
     transcribed_phonemes, transcribed_map = get_phonemes_with_word_mapping(transcription_clean)
 
-    # Global phoneme distance: edit distance over the phoneme sequences. Unlike
-    # the old DTW over character codes, this counts actual phoneme substitutions/
-    # insertions/deletions and can be normalized by the expected length.
-    distance = Levenshtein.distance(expected_phonemes, transcribed_phonemes)
-
-    # Numerical phoneme sequences, used below to build comparable contours.
-    expected_seq = get_phoneme_embeddings(" ".join(expected_phonemes))
-    transcribed_seq = get_phoneme_embeddings(" ".join(transcribed_phonemes))
+    # Global phoneme distance: *character-level* edit distance over the joined
+    # phoneme strings. espeak returns one undelimited phoneme string per word
+    # (e.g. "ðə"), so an edit distance over the word-token lists would count a
+    # whole word as a single all-or-nothing error; characters approximate
+    # individual phonemes and give partial credit for near-misses.
+    expected_join = " ".join(expected_phonemes)
+    transcribed_join = " ".join(transcribed_phonemes)
+    phoneme_distance = Levenshtein.distance(expected_join, transcribed_join)
 
     errors: List[Dict[str, Any]] = []
     words_with_errors = set()
@@ -402,18 +399,21 @@ def compare_transcriptions(transcription: str, text_reference: str) -> Dict[str,
                     seen_words.add(w)
         actual_text = " ".join(actual_words)
 
-        # Compare the expected vs actual phoneme segments.
-        expected_seg = [expected_phonemes[i] for i in word_indices]
-        actual_seg = [transcribed_phonemes[i] for i in sorted_trans_indices]
+        # Compare the expected vs actual phonemes character by character.
+        # Joining into strings first matters: each list element is a whole
+        # word's phoneme string, so a list-level edit distance would flag the
+        # word on *any* difference and kill the 40% tolerance below.
+        expected_str = "".join(expected_phonemes[i] for i in word_indices)
+        actual_str = "".join(transcribed_phonemes[i] for i in sorted_trans_indices)
 
-        p_dist = Levenshtein.distance(expected_seg, actual_seg)
+        p_dist = Levenshtein.distance(expected_str, actual_str)
 
         # Mark a mispronunciation when the phoneme edit distance exceeds 40% of length.
-        if p_dist > len(expected_seg) * 0.4:
+        if p_dist > len(expected_str) * 0.4:
             errors.append({
                 "position": word_indices.start,
-                "expected": "".join(expected_seg),  # expected phonemes
-                "actual": "".join(actual_seg),      # actual phonemes
+                "expected": expected_str,           # expected phonemes
+                "actual": actual_str,               # actual phonemes
                 "word": word,                       # expected word text
                 "actual_word": actual_text,         # actual word text (e.g. "I M")
             })
@@ -426,39 +426,18 @@ def compare_transcriptions(transcription: str, text_reference: str) -> Dict[str,
     else:
         feedback += "✅ Your pronunciation is excellent! 🎉\n"
 
-    # DTW-align the numeric phoneme vectors so the two contours share a length.
-    expected_vector, transcribed_vector = align_sequences_dtw(
-        expected_seq.tolist(), transcribed_seq.tolist())
-
     return {
         "word_distance": word_distance,
         "reference_length": len(reference_clean),
-        "phoneme_distance": distance,
+        "phoneme_distance": phoneme_distance,
+        "phoneme_length": len(expected_join),
         "errors": errors,
         "feedback": feedback,
         "transcribe": transcription,
-        "expected_vector": expected_vector.astype(float).tolist(),
-        "transcribed_vector": transcribed_vector.astype(float).tolist(),
         "expected_phonemes": expected_phonemes,
         "transcribed_phonemes": transcribed_phonemes,
         "words_with_errors": list(words_with_errors),
     }
-
-
-def align_sequences_dtw(seq1, seq2):
-    """Align two numeric sequences with DTW and return equal-length arrays.
-
-    Lets contours of different speeds/lengths be compared directly.
-    """
-    _distance, path = fastdtw(seq1, seq2, dist=euclidean)
-
-    aligned_seq1 = []
-    aligned_seq2 = []
-    for i, j in path:
-        aligned_seq1.append(seq1[i][0])  # preserve the first (only) dimension
-        aligned_seq2.append(seq2[j][0])
-
-    return np.array(aligned_seq1), np.array(aligned_seq2)
 
 
 def _random_pair_baseline(emb_a: np.ndarray, emb_b: np.ndarray,
@@ -468,6 +447,10 @@ def _random_pair_baseline(emb_a: np.ndarray, emb_b: np.ndarray,
     Approximates the per-step DTW distance of *unrelated* content, giving each
     utterance its own automatic "completely wrong" ceiling for the acoustic score.
     """
+    if len(emb_a) == 0 or len(emb_b) == 0:
+        # Degenerate input (near-empty audio): no frames to sample from, so
+        # fall back to the fixed ceiling instead of crashing the analysis.
+        return ACOUSTIC_BAD_DEFAULT
     rng = np.random.default_rng(seed)
     i = rng.integers(0, len(emb_a), n_pairs)
     j = rng.integers(0, len(emb_b), n_pairs)
@@ -562,7 +545,10 @@ def clean_transcription(text: str) -> str:
 # reference-side waveform, embeddings, F0 and energy never change between
 # attempts. Cache the most recent reference (one phrase is practiced at a time)
 # so repeats skip the Wav2Vec2 pass and pyin pitch tracking on the reference.
+# The lock makes concurrent analyze() calls safe; in the app they are already
+# serialized by the GUI's is_processing_audio guard, so it is uncontended.
 _reference_cache: Dict[str, Any] = {}
+_reference_cache_lock = threading.Lock()
 
 
 def _reference_features(reference_audio: np.ndarray, reference_sr: int) -> Dict[str, Any]:
@@ -570,16 +556,17 @@ def _reference_features(reference_audio: np.ndarray, reference_sr: int) -> Dict[
     global _reference_cache
     arr = np.asarray(reference_audio)
     key = (reference_sr, arr.shape, hash(arr.tobytes()))
-    if _reference_cache.get("key") != key:
-        wav = _trim_silence(_prepare_waveform(arr, reference_sr))
-        _reference_cache = {
-            "key": key,
-            "wav": wav,
-            "embeddings": extract_embeddings(wav),
-            "f0": interpolate_f0(extract_f0(wav, TARGET_SAMPLE_RATE)),
-            "energy": extract_energy(wav),
-        }
-    return _reference_cache
+    with _reference_cache_lock:
+        if _reference_cache.get("key") != key:
+            wav = _trim_silence(_prepare_waveform(arr, reference_sr))
+            _reference_cache = {
+                "key": key,
+                "wav": wav,
+                "embeddings": extract_embeddings(wav),
+                "f0": interpolate_f0(extract_f0(wav, TARGET_SAMPLE_RATE)),
+                "energy": extract_energy(wav),
+            }
+        return _reference_cache
 
 
 # =====================================================================
@@ -603,7 +590,8 @@ def analyze(user_audio: np.ndarray,
             expected_text: str,
             reference_audio: np.ndarray,
             user_sr: int = TARGET_SAMPLE_RATE,
-            reference_sr: int = KOKORO_SAMPLE_RATE) -> PronunciationResult:
+            reference_sr: int = KOKORO_SAMPLE_RATE,
+            voice: Optional[str] = None) -> PronunciationResult:
     """Compare a user's spoken attempt against the expected phrase.
 
     Args:
@@ -612,6 +600,9 @@ def analyze(user_audio: np.ndarray,
         reference_audio: Kokoro-synthesised reference waveform for the same phrase.
         user_sr: sample rate of ``user_audio`` (recording path is 16 kHz).
         reference_sr: sample rate of ``reference_audio`` (Kokoro is 24 kHz).
+        voice: Kokoro voice the reference was synthesized with. Only recorded in
+            the calibration sample log — the acoustic floor is voice-specific,
+            so calibrate.py needs to know which voice produced each sample.
 
     Returns:
         PronunciationResult with score, per-word errors, prosody and transcription.
@@ -639,8 +630,8 @@ def analyze(user_audio: np.ndarray,
     transcription = clean_transcription(transcribe(user_wav))
     differences = compare_transcriptions(transcription, expected_text)
 
-    phoneme_count = max(1, len(differences["expected_phonemes"]))
-    phoneme_error_rate = differences["phoneme_distance"] / phoneme_count
+    phoneme_length = max(1, differences["phoneme_length"])
+    phoneme_error_rate = differences["phoneme_distance"] / phoneme_length
     reference_length = max(1, differences["reference_length"])
     word_error_rate = differences["word_distance"] / reference_length
 
@@ -655,20 +646,21 @@ def analyze(user_audio: np.ndarray,
     # consumes the structured copy appended to SAMPLES_FILE below.
     logging.info(
         "[pronounce] score=%.1f | acoustic/step=%.4f (good=%.3f bad=%.3f baseline=%.4f) | "
-        "phonemes=%d/%d (err=%.2f) | words_lev=%d/%d (err=%.2f) | asr=%r",
+        "phonemes=%d/%d (err=%.2f) | words_lev=%d/%d (err=%.2f) | voice=%s | asr=%r",
         score, acoustic_per_step, ACOUSTIC_GOOD, acoustic_bad, acoustic_baseline,
-        differences["phoneme_distance"], phoneme_count, phoneme_error_rate,
+        differences["phoneme_distance"], phoneme_length, phoneme_error_rate,
         differences["word_distance"], reference_length, word_error_rate,
-        transcription,
+        voice, transcription,
     )
     _append_calibration_sample({
         "ts": datetime.now().isoformat(timespec="seconds"),
         "text": expected_text,
         "asr": transcription,
+        "voice": voice,
         "acoustic_per_step": round(acoustic_per_step, 5),
         "acoustic_baseline": round(acoustic_baseline, 5),
         "phoneme_distance": int(differences["phoneme_distance"]),
-        "phoneme_count": int(phoneme_count),
+        "phoneme_length": int(phoneme_length),
         "word_distance": int(differences["word_distance"]),
         "reference_length": int(reference_length),
         "phoneme_error_rate": round(phoneme_error_rate, 4),

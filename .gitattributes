@@ -1,0 +1,10 @@
+# Normalize line endings in the repository to LF so whole-file CRLF/LF churn
+# stops showing up in diffs (checkout still uses the platform default).
+* text=auto
+
+# Binary assets — never normalize.
+*.gguf binary
+*.wav binary
+*.bin binary
+*.pt binary
+*.pth binary
