@@ -8,7 +8,7 @@ BASE_DIR = Path(__file__).parent
 # =====================================================================
 # Local model cache (HuggingFace) — download once, then load offline
 # =====================================================================
-# Whisper, Kokoro and Wav2Vec2 are all pulled from the HuggingFace Hub. We pin
+# Kokoro and Wav2Vec2 are pulled from the HuggingFace Hub. We pin
 # their cache to a project-local folder so the weights live next to the code and
 # survive a cleared home-directory cache. Once every model is present we flip the
 # Hub into offline mode, which skips the per-start network round-trip HF normally
@@ -24,8 +24,10 @@ MODEL_CACHE_DIR.mkdir(exist_ok=True)
 os.environ.setdefault("HF_HOME", str(MODEL_CACHE_DIR))
 
 # Repo IDs whose presence in the cache means "fully downloaded".
+# Whisper (Systran/faster-whisper-small) is intentionally absent: STT is
+# disabled (stt.py is kept but never loaded), so its cache must not gate
+# offline mode.
 _CACHED_REPOS = (
-    "Systran/faster-whisper-small",   # faster-whisper "small"
     "hexgrad/Kokoro-82M",             # Kokoro TTS (model + voice files)
     "facebook/wav2vec2-large-960h",   # Wav2Vec2 pronunciation model
 )
@@ -49,19 +51,10 @@ if _all_models_cached():
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # =====================================================================
-# Language Pair & Persona Configuration
+# Language Configuration
 # =====================================================================
-NATIVE_LANGUAGE = "Russian"
 TARGET_LANGUAGE = "English"
 TARGET_LANG_CODE = "en"  # ISO code used for Whisper transcription routing
-
-# System prompt shaping the LLM behavior into a specific educational persona
-SYSTEM_PROMPT = (
-    f"You are a friendly {TARGET_LANGUAGE} tutor named Emma. "
-    f"The user's native language is {NATIVE_LANGUAGE}, but you should talk to them in simple {TARGET_LANGUAGE}. "
-    "Keep responses very short. Use simple spoken sentences. "
-    "Avoid idioms, abbreviations, complex punctuation, and compressed phrases."
-)
 
 # =====================================================================
 # Controls
@@ -111,17 +104,12 @@ EXTERNAL_MODEL_PATH = str(BASE_DIR / "models" / "llama-3.2-3b-instruct-q4_k_m.gg
 EXTERNAL_N_GPU_LAYERS = 20  # Number of layers to offload to GPU
 EXTERNAL_N_CTX = 2048       # Context window size
 
-# Generation tuning parameters
-LLM_TEMPERATURE = 0.3
-LLM_MAX_TOKENS = 50
-LLM_TOP_P = 0.9
-
-# Context buffer constraints
-LLM_HISTORY_MAX_PAIRS = 4  # Number of full conversation turns kept in short-term memory
-
 # =====================================================================
 # Speech-to-Text (Whisper) Settings
 # =====================================================================
+# NOTE: Whisper STT is currently disabled — main.py neither loads nor warms up
+# STTManager (transcription is done by Wav2Vec2 in pronounce/). The settings
+# below are kept so stt.py can be re-enabled without changes.
 WHISPER_MODEL = "small"
 WHISPER_BEAM_SIZE = 1         # Beam size 1 provides optimal speed at temperature 0.0
 WHISPER_NO_SPEECH_THRESHOLD = 0.45
@@ -248,6 +236,11 @@ PHRASE_GEN_FRAGMENT_MAX_TOKENS = 16
 # speaker (tts.py) streams. Both modules import this object — do not create
 # separate Lock instances or they will not mutually exclude each other.
 AUDIO_LOCK = threading.Lock()
+
+# Pipeline sample rate: mic captures are downsampled to this rate, and it is
+# what playback of recordings and Wav2Vec2 pronunciation analysis expect.
+# (Equals the 16 kHz Whisper would also require if STT were re-enabled.)
+AUDIO_SAMPLE_RATE = 16_000
 
 AUDIO_CHANNELS = 1           # Mono for both recording and playback
 AUDIO_LATENCY = None         # None → OS default shared-mode latency

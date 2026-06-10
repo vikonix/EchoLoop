@@ -81,18 +81,16 @@ class TTSManager:
         warmup_word = KOKORO_WARMUP_WORDS.get(config.KOKORO_LANG_CODE, "Hi.")
         list(self.pipeline(warmup_word, voice=config.KOKORO_VOICE, model=self.model))
 
-    def synthesize(self, text: str, stop_event: Event = _NULL_EVENT,
-                   shutdown_event: Event = _NULL_EVENT,
-                   voice: Optional[str] = None) -> np.ndarray:
+    def synthesize(self, text: str, voice: Optional[str] = None) -> np.ndarray:
         """Synthesize ``text`` and return the raw waveform (mono float32, 24 kHz).
 
         ``voice`` selects the Kokoro voice; when omitted it falls back to the
         configured default. Any voice of the loaded pipeline's language works
         without reloading the model.
 
-        Returns an empty array if there is nothing to say or playback was
-        interrupted. The returned array is reused both for playback and as the
-        reference signal fed into pronunciation analysis, so we synthesize once.
+        Returns an empty array if there is nothing to say. The returned array is
+        reused both for playback and as the reference signal fed into
+        pronunciation analysis, so we synthesize once.
         """
         if self.model is None or self.pipeline is None:
             raise RuntimeError("TTS model not loaded. Call load_model() first.")
@@ -106,8 +104,6 @@ class TTSManager:
 
         audio_chunks = []
         for _, _, audio in generator:
-            if stop_event.is_set() or shutdown_event.is_set():
-                return np.zeros(0, dtype=np.float32)
             if audio is not None and len(audio) > 0:
                 audio_chunks.append(np.asarray(audio, dtype=np.float32))
 
@@ -195,9 +191,3 @@ class TTSManager:
 
         except Exception:
             logging.exception("TTS playback error:")
-
-    def play_stream(self, text: str, stop_event: Event = _NULL_EVENT,
-                    shutdown_event: Event = _NULL_EVENT):
-        """Synthesize ``text`` with Kokoro and play it (convenience wrapper)."""
-        audio = self.synthesize(text, stop_event, shutdown_event)
-        self.play_array(audio, KOKORO_SAMPLE_RATE, stop_event, shutdown_event)

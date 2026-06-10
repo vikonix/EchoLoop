@@ -18,7 +18,9 @@ warnings.filterwarnings("ignore", message="dropout option adds dropout.*")
 warnings.filterwarnings("ignore", message=".*weight_norm.*deprecated.*")
 
 import config
-from stt import STTManager, WHISPER_SAMPLE_RATE
+# Whisper STT is disabled: stt.py is not imported, so faster-whisper is never
+# loaded and no VRAM/start-up time is spent on it. Transcription is done by
+# Wav2Vec2 in pronounce/. Re-enable by importing STTManager from stt again.
 from llm import LLMManager
 from tts import TTSManager, KOKORO_SAMPLE_RATE
 import pronounce
@@ -136,7 +138,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         # Sample rate the microphone is actually captured at. We record at the
         # device's native rate (via WASAPI on Windows) to avoid the driver's
         # low-quality on-the-fly resampling, then downsample to 16 kHz ourselves.
-        self.capture_sr: int = WHISPER_SAMPLE_RATE
+        self.capture_sr: int = config.AUDIO_SAMPLE_RATE
 
         # Audio processing guard — prevents concurrent analysis runs
         self.is_processing_audio = False
@@ -153,7 +155,6 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         self._last_prosody: Optional[dict] = None
 
         # Initialize core modular sub-managers
-        self.stt_mgr = STTManager()
         self.tts_mgr = TTSManager()
 
         # LLM backend (used only to generate practice phrases)
@@ -227,12 +228,9 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
     def load_components(self):
         logging.info("Starting model loading thread...")
         self.root.after(0, self.update_status, "Loading models...", "#ffb86c")
-        self.root.after(0, self.append_system_msg, "Loading STT, TTS and pronunciation models...")
+        self.root.after(0, self.append_system_msg, "Loading TTS and pronunciation models...")
 
         try:
-            self.stt_mgr.load_model()
-            logging.info("STT model loaded.")
-
             self.tts_mgr.load_model()
             logging.info("TTS model loaded.")
 
@@ -256,7 +254,6 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
                     self.root.after(0, self.append_system_msg, "Warning: LM Studio is offline. Start it to generate phrases!")
 
             self.root.after(0, self.update_status, "Warming up models...", "#ffb86c")
-            self.stt_mgr.warm_up()
             self.tts_mgr.warm_up()
             pronounce.warm_up()
             logging.info("Models warmed up.")
@@ -502,7 +499,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         """
         # An explicit device override always wins.
         if config.AUDIO_INPUT_DEVICE is not None:
-            return config.AUDIO_INPUT_DEVICE, WHISPER_SAMPLE_RATE
+            return config.AUDIO_INPUT_DEVICE, config.AUDIO_SAMPLE_RATE
         try:
             for api in sd.query_hostapis():
                 if "wasapi" not in api["name"].lower():
@@ -515,7 +512,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
                 return dev_index, native_sr
         except Exception:
             logging.exception("WASAPI device selection failed; using defaults.")
-        return config.AUDIO_INPUT_DEVICE, WHISPER_SAMPLE_RATE
+        return config.AUDIO_INPUT_DEVICE, config.AUDIO_SAMPLE_RATE
 
     def record_loop(self):
         start_time = time.time()
@@ -629,10 +626,10 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
 
         # Audio was captured at the device's native rate; downsample to the 16 kHz
         # the rest of the pipeline (playback, analysis, debug dump) expects.
-        if self.capture_sr != WHISPER_SAMPLE_RATE:
+        if self.capture_sr != config.AUDIO_SAMPLE_RATE:
             import librosa
             audio = librosa.resample(audio, orig_sr=self.capture_sr,
-                                     target_sr=WHISPER_SAMPLE_RATE)
+                                     target_sr=config.AUDIO_SAMPLE_RATE)
         return np.ascontiguousarray(audio, dtype=np.float32)
 
     # ------------------------------------------------------------------
@@ -688,20 +685,20 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
     def analyze_recording(self):
         try:
             audio = self.get_recorded_audio()
-            if audio is None or len(audio) < WHISPER_SAMPLE_RATE * 0.2:
+            if audio is None or len(audio) < config.AUDIO_SAMPLE_RATE * 0.2:
                 logging.warning("Captured audio too short or empty.")
                 self.root.after(0, self.append_system_msg, "Audio is too short. Hold the mic longer and try again.")
                 self.root.after(0, self._reset_to_retry)
                 return
 
             if DEBUG_DUMP_RECORDINGS:
-                self._dump_record_wav(audio, RECORD_RAW_FILE, WHISPER_SAMPLE_RATE)
+                self._dump_record_wav(audio, RECORD_RAW_FILE, config.AUDIO_SAMPLE_RATE)
 
             audio = self.normalize_audio(audio)
             self.last_user_audio = audio
 
             if DEBUG_DUMP_RECORDINGS:
-                self._dump_record_wav(audio, RECORD_NORMALIZED_FILE, WHISPER_SAMPLE_RATE)
+                self._dump_record_wav(audio, RECORD_NORMALIZED_FILE, config.AUDIO_SAMPLE_RATE)
 
             if self.current_phrase is None or self.reference_audio is None:
                 self.root.after(0, self.append_system_msg, "No active phrase to compare against.")
@@ -714,7 +711,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
             self.playback_stop_event.clear()
             self.root.after(0, self.draw_mic_button, "speaking")
             self.root.after(0, self.update_status, "Playing your recording...", "#ff79c6")
-            self.tts_mgr.play_array(self.last_user_audio, WHISPER_SAMPLE_RATE,
+            self.tts_mgr.play_array(self.last_user_audio, config.AUDIO_SAMPLE_RATE,
                                     self.playback_stop_event, self.shutdown_event)
             self.root.after(0, self.draw_mic_button, "processing")
             self.root.after(0, self.update_status, "Analyzing pronunciation...", "#ffb86c")
@@ -724,7 +721,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
                 user_audio=audio,
                 expected_text=self.current_phrase,
                 reference_audio=self.reference_audio,
-                user_sr=WHISPER_SAMPLE_RATE,
+                user_sr=config.AUDIO_SAMPLE_RATE,
                 reference_sr=KOKORO_SAMPLE_RATE,
             )
             elapsed_ms = (time.perf_counter() - analyze_start) * 1000
@@ -773,7 +770,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
     def play_user_recording(self):
         if self.last_user_audio is None or self.last_user_audio.size == 0:
             return
-        self._play_async(self.last_user_audio, WHISPER_SAMPLE_RATE, "Playing your recording...")
+        self._play_async(self.last_user_audio, config.AUDIO_SAMPLE_RATE, "Playing your recording...")
 
     def _play_async(self, waveform: np.ndarray, sample_rate: int, status: str):
         """Play a waveform in a background thread, stopping any current playback first."""
