@@ -94,7 +94,13 @@ pip install -r pronounce/requirements.txt
 
 The default `torch` and `llama-cpp-python` wheels are CPU-only. For NVIDIA GPUs:
 
-- **PyTorch** — install a CUDA build from [pytorch.org](https://pytorch.org/get-started/locally/).
+- **PyTorch** — install a CUDA build (other CUDA versions: see [pytorch.org](https://pytorch.org/get-started/locally/)):
+  ```powershell
+  python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124 --force-reinstall
+  ```
+  Reinstall `torch` and `torchaudio` **together**: force-reinstalling `torch` alone
+  leaves a `torchaudio` built against the previous torch, which then fails to
+  import (`OSError: [WinError 127]`) and breaks pronunciation analysis.
 - **llama-cpp-python** — build with CUDA (see [`llm_server/README.md`](llm_server/README.md) for details):
   ```powershell
   $env:CMAKE_ARGS="-DGGML_CUDA=on"
