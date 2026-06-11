@@ -7,6 +7,8 @@ kokoro>=0.3.0
 openai>=1.0.0
 keyboard>=0.13.5
 torch>=2.0.0
+# transformers 5.x needs torch>=2.7 (torch.float8_e8m0fnu); cu124 wheels top out at torch 2.6
+transformers<5
 
 # Subproject dependencies (paths are relative to this file).
 # llm_server brings llama-cpp-python — CPU-only build by default; for the CUDA
