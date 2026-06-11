@@ -1,3 +1,4 @@
+# Core dependencies
 numpy>=1.24.0
 soundfile>=0.12.0
 sounddevice>=0.4.6
@@ -6,6 +7,10 @@ kokoro>=0.3.0
 openai>=1.0.0
 keyboard>=0.13.5
 torch>=2.0.0
-# CPU-only build by default; for the CUDA build (GPU offload for the LLM)
-# see "llama-cpp-python with CUDA Support" in llm_server/README.md.
-llama-cpp-python>=0.2.0
+
+# Subproject dependencies (paths are relative to this file).
+# llm_server brings llama-cpp-python — CPU-only build by default; for the CUDA
+# build (GPU offload for the LLM) see "llama-cpp-python with CUDA Support"
+# in llm_server/README.md.
+-r llm_server/requirements.txt
+-r pronounce/requirements.txt

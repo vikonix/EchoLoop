@@ -42,12 +42,18 @@ def _register_nvidia_dll_dirs() -> None:
     nvidia-cublas-cu12 pip packages, which place them under
     site-packages/nvidia/*/bin — register those dirs before importing
     llama_cpp. No-op on non-Windows or when the packages are absent.
+
+    llama_cpp loads llama.dll with winmode=RTLD_GLOBAL (0), which selects the
+    legacy Windows DLL search: PATH is consulted, os.add_dll_directory() dirs
+    are not — so the dirs must go on PATH (add_dll_directory is kept in case
+    a future llama_cpp switches to the default winmode).
     """
     if sys.platform != "win32":
         return
     for site_dir in site.getsitepackages():
         for bin_dir in Path(site_dir).glob("nvidia/*/bin"):
             os.add_dll_directory(str(bin_dir))
+            os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ["PATH"]
 
 
 _register_nvidia_dll_dirs()
