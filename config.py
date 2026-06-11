@@ -53,6 +53,10 @@ _KNOWN_USER_KEYS = {
     "voice",
     "pronunciation_score_threshold",
     "max_record_seconds",
+    "llm_backend",
+    "external_model_path",
+    "practice_text_file",
+    "phrase_gen_recent_memory",
 }
 for _key in _USER:
     if not _key.startswith("_") and _key not in _KNOWN_USER_KEYS:
@@ -69,6 +73,23 @@ def _user_number(key: str, default):
     print(f"[config] settings.json: {key} must be a number, got {value!r}; "
           f"using {default}", file=sys.stderr)
     return default
+
+
+def _user_path(key: str, default: Path) -> str:
+    """Path setting from settings.json; *default* on a non-string value.
+
+    A relative value is resolved against BASE_DIR (pathlib keeps an absolute
+    value as-is when joined), so settings.json works regardless of the working
+    directory at launch.
+    """
+    value = _USER.get(key)
+    if value is None:
+        return str(default)
+    if isinstance(value, str) and value.strip():
+        return str(BASE_DIR / value)
+    print(f"[config] settings.json: {key} must be a non-empty string, got "
+          f"{value!r}; using {default}", file=sys.stderr)
+    return str(default)
 
 # =====================================================================
 # Local model cache (HuggingFace) — download once, then load offline
@@ -148,10 +169,15 @@ if DEVICE not in ("cuda", "cpu"):
 # =====================================================================
 # LLM Backend Settings
 # =====================================================================
-# Backend selection:
+# Backend selection, read from settings.json ("llm_backend"):
 #   "lm-studio"    — external LM Studio app (must be running separately)
 #   "local_server" — llm_server.py started automatically as a subprocess
-LLM_BACKEND = "local_server"
+LLM_BACKEND = _USER.get("llm_backend", "local_server")
+if LLM_BACKEND not in ("local_server", "lm-studio"):
+    print(f"[config] settings.json: unknown llm_backend {LLM_BACKEND!r} "
+          f"(expected 'local_server' or 'lm-studio'); using 'local_server'",
+          file=sys.stderr)
+    LLM_BACKEND = "local_server"
 
 # =====================================================================
 # LM Studio backend (for "lm-studio" backend)
@@ -175,8 +201,12 @@ LOCAL_SERVER_STARTUP_TIMEOUT = 60
 # =====================================================================
 # GGUF Model Settings (shared by "local_server" and "local_gguf" backends)
 # =====================================================================
-# Absolute path — safe regardless of the working directory at launch
-EXTERNAL_MODEL_PATH = str(BASE_DIR / "models" / "llama-3.2-3b-instruct-q4_k_m.gguf")
+# GGUF file, read from settings.json ("external_model_path"); a relative path
+# resolves against the project root.
+EXTERNAL_MODEL_PATH = _user_path(
+    "external_model_path",
+    BASE_DIR / "models" / "llama-3.2-3b-instruct-q4_k_m.gguf",
+)
 # GPU offload and context size: hwconfig picks values matched to the detected
 # VRAM/RAM; the literals here are conservative fallbacks for unknown hardware.
 EXTERNAL_N_GPU_LAYERS = _HW.get("EXTERNAL_N_GPU_LAYERS", 20)  # layers on GPU (-1 = all)
@@ -297,8 +327,10 @@ PRONUNCIATION_ACOUSTIC_GOOD = 0.20
 # Practice Text & Phrase Generation
 # =====================================================================
 # Source text shown in the input panel at startup. The LLM builds practice
-# phrases from whatever text the user has in that panel.
-PRACTICE_TEXT_FILE = str(BASE_DIR / "practice_text.txt")
+# phrases from whatever text the user has in that panel. Read from
+# settings.json ("practice_text_file"); a relative path resolves against the
+# project root.
+PRACTICE_TEXT_FILE = _user_path("practice_text_file", BASE_DIR / "practice_text.txt")
 
 # One short phrase is generated per request (non-streaming).
 PHRASE_GEN_TEMPERATURE = 0.7
@@ -309,8 +341,9 @@ PHRASE_GEN_SYSTEM_PROMPT = (
     "Use only plain words and a single final period — no quotation marks, no numbering, "
     "no extra commentary. Base the sentence on the topic and vocabulary of the text the user provides."
 )
-# How many recently used phrases to send back to the model so it avoids repeats.
-PHRASE_GEN_RECENT_MEMORY = 5
+# How many recently used phrases to send back to the model so it avoids
+# repeats. int() because the value is used for list slicing.
+PHRASE_GEN_RECENT_MEMORY = int(_user_number("phrase_gen_recent_memory", 5))
 
 # "Few words" mode: generate a short 2-4 word fragment instead of a complete
 # sentence (e.g. "give me", "on the table", "where are you from"). Uses its own

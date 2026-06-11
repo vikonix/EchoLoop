@@ -11,5 +11,17 @@
   "pronunciation_score_threshold": 70.0,
 
   "_max_record_seconds": "Hard limit on a single recording, in seconds (safety stop for a stuck key).",
-  "max_record_seconds": 20
+  "max_record_seconds": 20,
+
+  "_llm_backend": "'local_server' starts llm_server automatically; 'lm-studio' uses an already-running LM Studio app.",
+  "llm_backend": "local_server",
+
+  "_external_model_path": "GGUF model file for the local_server backend. Relative paths resolve against the project root.",
+  "external_model_path": "models/llama-3.2-3b-instruct-q4_k_m.gguf",
+
+  "_practice_text_file": "Source text shown in the input panel at startup. Relative paths resolve against the project root.",
+  "practice_text_file": "practice_text.txt",
+
+  "_phrase_gen_recent_memory": "How many recent phrases are sent back to the LLM so it avoids repeats.",
+  "phrase_gen_recent_memory": 5
 }
