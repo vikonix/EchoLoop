@@ -56,6 +56,7 @@ _KNOWN_USER_KEYS = {
     "max_record_seconds",
     "llm_backend",
     "external_model_path",
+    "external_n_ctx",
     "practice_text_file",
     "phrase_gen_recent_memory",
 }
@@ -211,7 +212,10 @@ EXTERNAL_MODEL_PATH = _user_path(
 # GPU offload and context size: hwconfig picks values matched to the detected
 # VRAM/RAM; the literals here are conservative fallbacks for unknown hardware.
 EXTERNAL_N_GPU_LAYERS = _HW.get("EXTERNAL_N_GPU_LAYERS", 20)  # layers on GPU (-1 = all)
-EXTERNAL_N_CTX = _HW.get("EXTERNAL_N_CTX", 2048)              # context window size
+# Context window size (n_ctx). settings.json ("external_n_ctx") wins over the
+# hwconfig-detected value, per the usual layering. int() because the value is
+# passed to the server as a command-line argument (a float would break it).
+EXTERNAL_N_CTX = int(_user_number("external_n_ctx", _HW.get("EXTERNAL_N_CTX", 2048)))
 
 # =====================================================================
 # Speech-to-Text (Whisper) Settings
