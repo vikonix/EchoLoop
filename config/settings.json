@@ -1,33 +1,25 @@
 {
   "_readme": "EchoLoop user settings. Edit by hand; restart the app to apply. Delete a key (or this whole file) to fall back to the built-in default. Keys starting with '_' are ignored and may be used as comments.",
-
   "_color_theme": "UI color theme: 'dark' or 'light'. Loads config/themes/<name>_schema.json; restart the app to apply.",
   "color_theme": "dark",
-
   "_english_accent": "Target accent: 'american' or 'british'. Drives the TTS voices and the espeak dialect used for pronunciation scoring.",
   "english_accent": "american",
-
   "_voice": "Default TTS voice; null means the accent's default (af_heart / bf_emma). Must belong to the selected accent. American: af_heart, af_bella, af_nicole, af_sarah, af_sky, am_adam, am_michael, am_echo, am_eric, am_liam. British: bf_emma, bf_alice, bf_isabella, bf_lily, bm_george, bm_daniel, bm_fable, bm_lewis.",
   "voice": null,
-
   "_pronunciation_score_threshold": "Score (0-100) at or above which an attempt is accepted; lower = more forgiving.",
   "pronunciation_score_threshold": 70.0,
-
   "_max_record_seconds": "Hard limit on a single recording, in seconds (safety stop for a stuck key).",
   "max_record_seconds": 20,
-
   "_llm_backend": "'local_server' starts llm_server automatically; 'lm-studio' uses an already-running LM Studio app.",
   "llm_backend": "local_server",
-
   "_external_model_path": "GGUF model file for the local_server backend. Relative paths resolve against the project root.",
   "external_model_path": "models/llama-3.2-3b-instruct-q4_k_m.gguf",
-
   "_external_n_ctx": "Context window size (n_ctx) for the local GGUF model. Overrides the hwconfig-detected value; delete the key to fall back to it.",
   "external_n_ctx": 4096,
-
   "_practice_text_file": "Source text shown in the input panel at startup. Relative paths resolve against the project root.",
   "practice_text_file": "texts/practice_text.txt",
-
   "_phrase_gen_recent_memory": "How many recent phrases are sent back to the LLM so it avoids repeats.",
-  "phrase_gen_recent_memory": 5
+  "phrase_gen_recent_memory": 5,
+  "_user_name": "Display name of the practicing user; editable in the app's Name field and saved automatically.",
+  "user_name": ""
 }

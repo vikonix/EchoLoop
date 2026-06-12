@@ -120,8 +120,27 @@ class PronunciationTrainerUI:
         source_frame = tk.Frame(self.root, bg=THEME["bg_main"])
         source_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(0, 5))
 
-        tk.Label(source_frame, text="Practice text (edit freely):",
-                 font=("Segoe UI", 9, "bold"), fg=THEME["text_dim"], bg=THEME["bg_main"]).pack(anchor=tk.W)
+        # Header row above the practice text: caption on the left, the user-name
+        # field on the right edge. The name is persisted to settings.json when
+        # editing finishes (see on_user_name_changed).
+        text_header = tk.Frame(source_frame, bg=THEME["bg_main"])
+        text_header.pack(fill=tk.X)
+        tk.Label(text_header, text="Practice text (edit freely):",
+                 font=("Segoe UI", 9, "bold"), fg=THEME["text_dim"], bg=THEME["bg_main"]).pack(side=tk.LEFT)
+
+        self.user_name_var = tk.StringVar(value=config.USER_NAME)
+        self.user_name_entry = tk.Entry(
+            text_header, textvariable=self.user_name_var, width=14,
+            font=("Segoe UI", 9), bg=THEME["bg_accent"], fg=THEME["text_accent"],
+            insertbackground=THEME["text_bright"], bd=0, highlightthickness=1,
+            highlightbackground=THEME["border"], highlightcolor=THEME["accent"])
+        self.user_name_entry.pack(side=tk.RIGHT)
+        tk.Label(text_header, text="Name:", font=("Segoe UI", 9),
+                 fg=THEME["text_dim"], bg=THEME["bg_main"]).pack(side=tk.RIGHT, padx=(0, 6))
+        # Save on focus loss; Enter just drops focus (which triggers the save
+        # and returns the spacebar to push-to-talk duty).
+        self.user_name_entry.bind("<FocusOut>", self.on_user_name_changed)
+        self.user_name_entry.bind("<Return>", lambda e: self.root.focus_set())
 
         self.source_text = scrolledtext.ScrolledText(
             source_frame, bg=THEME["bg_panel"], fg=THEME["text"], insertbackground=THEME["text_bright"],

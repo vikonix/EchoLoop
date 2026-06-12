@@ -62,6 +62,7 @@ _KNOWN_USER_KEYS = {
     "external_n_ctx",
     "practice_text_file",
     "phrase_gen_recent_memory",
+    "user_name",
 }
 for _key in _USER:
     if not _key.startswith("_") and _key not in _KNOWN_USER_KEYS:
@@ -107,6 +108,37 @@ def _user_path(key: str, default: Path) -> str:
     print(f"[config] settings.json: {key} must be a non-empty string, got "
           f"{value!r}; using {default}", file=sys.stderr)
     return str(default)
+
+
+def save_user_setting(key: str, value) -> bool:
+    """Write one setting back to settings.json, keeping every other key.
+
+    The file is re-read first so hand-edited values and the "_" comment keys
+    are preserved. Failures are reported, never raised — saving a preference
+    must not crash the app. Returns True on success.
+    """
+    path = CONFIG_DIR / "settings.json"
+    data = _read_json(path)
+    data[key] = value
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+    except OSError as exc:
+        print(f"[config] cannot write {path.name} ({exc}); {key} not saved",
+              file=sys.stderr)
+        return False
+    _USER[key] = value  # keep the in-memory view consistent for this run
+    return True
+
+
+# Display name of the practicing user; shown in the Name field of the UI and
+# written back via save_user_setting("user_name", ...) when edited.
+USER_NAME = _USER.get("user_name", "")
+if not isinstance(USER_NAME, str):
+    print(f"[config] settings.json: user_name must be a string, got "
+          f"{USER_NAME!r}; using ''", file=sys.stderr)
+    USER_NAME = ""
 
 # =====================================================================
 # Local model cache (HuggingFace) — download once, then load offline

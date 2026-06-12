@@ -146,6 +146,9 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         self.recent_phrases: List[str] = []
         # Last analysis prosody, kept so the canvases can redraw on window resize.
         self._last_prosody: Optional[dict] = None
+        # Last user name written to settings.json; lets on_user_name_changed
+        # skip the file write when the field loses focus without an edit.
+        self._saved_user_name: str = config.USER_NAME
 
         # Initialize core modular sub-managers
         self.tts_mgr = TTSManager()
@@ -286,6 +289,17 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         if str(self.ref_btn["state"]) == str(tk.NORMAL):
             self.play_reference()
 
+    def on_user_name_changed(self, event=None):
+        """Persist the user name to settings.json once editing finishes (FocusOut)."""
+        name = self.user_name_var.get().strip()
+        if name == self._saved_user_name:
+            return  # unchanged — don't rewrite the file
+        if config.save_user_setting("user_name", name):
+            self._saved_user_name = name
+            logging.info(f"User name saved: {name!r}.")
+        else:
+            self.append_error_msg("Could not save the user name to settings.json.")
+
     def on_length_changed(self, event=None):
         """Regenerate the phrase when the desired length changes."""
         logging.info(f"Phrase length changed to {self.length_var.get()!r}.")
@@ -397,8 +411,13 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         if self.recorder.is_active() and not self.space_is_held:
             self.trigger_recording_stop()
 
+    def _typing_in_text_field(self) -> bool:
+        """True when a text-input widget owns focus — spacebar should type, not record."""
+        return isinstance(self.root.focus_get(), (tk.Entry, tk.Text))
+
     def on_keyboard_press(self, event):
-        if event.keysym == "space" and not self.space_is_held:
+        if event.keysym == "space" and not self.space_is_held \
+                and not self._typing_in_text_field():
             self.space_is_held = True
             self.trigger_recording_start()
 
