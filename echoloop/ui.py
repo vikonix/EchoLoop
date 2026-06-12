@@ -112,16 +112,6 @@ class PronunciationTrainerUI:
 
         replay_frame = tk.Frame(control_frame, bg=THEME["bg_main"])
         replay_frame.pack(pady=5)
-        # Small diagnostic button (leftmost): run the reference through analysis
-        # instead of a recording (it should score near 100 against itself).
-        self.test_btn = tk.Button(replay_frame, text="Test", command=self.on_test_reference,
-                                  font=("Segoe UI", 8), bg=THEME["bg_panel"], fg=THEME["text_muted"],
-                                  activebackground=THEME["border"], activeforeground=THEME["info"],
-                                  bd=0, padx=8, pady=3, cursor="hand2",
-                                  disabledforeground=THEME["text_disabled_dim"])
-        self.test_btn.pack(side=tk.LEFT, padx=5)
-        self.test_btn.config(state=tk.DISABLED)
-
         self.user_btn = self._make_button(replay_frame, "▶ My recording", self.play_user_recording)
         self.user_btn.pack(side=tk.LEFT, padx=5)
         self.user_btn.config(state=tk.DISABLED)
@@ -140,9 +130,22 @@ class PronunciationTrainerUI:
             padx=10, pady=8)
         self.source_text.pack(fill=tk.X, pady=4)
 
-        # Selector row: voice and reference-playback speed share a single line.
+        # Selector row: phrase length, voice and reference-playback speed share
+        # a single line.
         selectors_frame = tk.Frame(source_frame, bg=THEME["bg_main"])
         selectors_frame.pack(anchor=tk.E, pady=(2, 0))
+
+        # Phrase-length selector. "Few words" requests a short fragment instead
+        # of a full sentence; changing it regenerates the phrase (see
+        # on_length_changed).
+        tk.Label(selectors_frame, text="Phrase length:", font=("Segoe UI", 9),
+                 fg=THEME["text_dim"], bg=THEME["bg_main"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.length_var = tk.StringVar(value=LENGTH_FULL)
+        self.length_selector = ttk.Combobox(
+            selectors_frame, textvariable=self.length_var, state="readonly",
+            width=12, values=(LENGTH_FULL, LENGTH_FEW_WORDS))
+        self.length_selector.pack(side=tk.LEFT, padx=(0, 12))
+        self.length_selector.bind("<<ComboboxSelected>>", self.on_length_changed)
 
         # Voice selector for the reference speech. Changing it regenerates the
         # phrase (see on_voice_changed) so the new voice is heard right away.
@@ -164,21 +167,23 @@ class PronunciationTrainerUI:
             selectors_frame, textvariable=self.playback_speed, state="readonly",
             width=5, values=("1.0×", "0.9×", "0.8×"))
         self.speed_selector.pack(side=tk.LEFT)
+        # Changing the speed replays the reference so the difference is heard
+        # immediately (see on_speed_changed).
+        self.speed_selector.bind("<<ComboboxSelected>>", self.on_speed_changed)
 
-        # Action row: phrase-length selector alongside the Reference replay and
-        # New phrase buttons. "Few words" requests a short fragment instead of a
-        # full sentence; changing it regenerates the phrase (see on_length_changed).
+        # Action row: Test diagnostic, Reference replay and New phrase buttons.
         action_frame = tk.Frame(source_frame, bg=THEME["bg_main"])
         action_frame.pack(anchor=tk.E, pady=(4, 0))
 
-        tk.Label(action_frame, text="Phrase length:", font=("Segoe UI", 9),
-                 fg=THEME["text_dim"], bg=THEME["bg_main"]).pack(side=tk.LEFT, padx=(0, 6))
-        self.length_var = tk.StringVar(value=LENGTH_FULL)
-        self.length_selector = ttk.Combobox(
-            action_frame, textvariable=self.length_var, state="readonly",
-            width=12, values=(LENGTH_FULL, LENGTH_FEW_WORDS))
-        self.length_selector.pack(side=tk.LEFT, padx=(0, 10))
-        self.length_selector.bind("<<ComboboxSelected>>", self.on_length_changed)
+        # Small diagnostic button: run the reference through analysis instead
+        # of a recording (it should score near 100 against itself).
+        self.test_btn = tk.Button(action_frame, text="Test", command=self.on_test_reference,
+                                  font=("Segoe UI", 8), bg=THEME["bg_panel"], fg=THEME["text_muted"],
+                                  activebackground=THEME["border"], activeforeground=THEME["info"],
+                                  bd=0, padx=8, pady=3, cursor="hand2",
+                                  disabledforeground=THEME["text_disabled_dim"])
+        self.test_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.test_btn.config(state=tk.DISABLED)
 
         self.ref_btn = self._make_button(action_frame, "▶ Reference", self.play_reference)
         self.ref_btn.pack(side=tk.LEFT, padx=(0, 6))
@@ -193,7 +198,7 @@ class PronunciationTrainerUI:
         phrase_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=5)
 
         self.phrase_label = tk.Label(phrase_frame, text="—", font=("Segoe UI", 15, "bold"),
-                                     fg=THEME["info"], bg=THEME["bg_panel"], wraplength=440, justify=tk.LEFT)
+                                     fg=THEME["info"], bg=THEME["bg_panel"], wraplength=520, justify=tk.LEFT)
         self.phrase_label.pack(anchor=tk.W, padx=12, pady=(10, 10))
 
         # 5b. Prosody panel — pitch (F0) and energy sparklines, you vs reference.
@@ -226,7 +231,7 @@ class PronunciationTrainerUI:
         tk.Label(prosody_frame,
                  text="Time runs left→right (stretched to equal width). Aim to match the reference shape.",
                  font=("Segoe UI", 8), fg=THEME["text_muted"], bg=THEME["bg_main"],
-                 wraplength=460, justify=tk.LEFT).pack(anchor=tk.W, pady=(3, 0))
+                 wraplength=540, justify=tk.LEFT).pack(anchor=tk.W, pady=(3, 0))
 
         # fill=X canvases change width on resize, so redraw from the cached prosody.
         self.f0_canvas.bind("<Configure>", lambda e: self._redraw_prosody())

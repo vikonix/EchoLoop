@@ -84,7 +84,7 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         # platforms or if the query fails. Horizontally centered, pinned to the top
         # of the work area. winfo_screen* are valid before the first mainloop
         # iteration, so the size/position are correct from the start.
-        window_width = 520
+        window_width = 600
         work_top, avail_height = 0, self.root.winfo_screenheight()
         try:
             import ctypes
@@ -276,6 +276,16 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
         except AttributeError:
             return "full"
 
+    def on_speed_changed(self, event=None):
+        """Replay the reference at the newly selected speed so it is heard right away."""
+        logging.info(f"Reference speed changed to {self.playback_speed.get()!r}.")
+        # Return focus to the window so the spacebar push-to-talk keeps working.
+        self.root.focus_set()
+        # Replay only when the Reference button is also allowed (a phrase is
+        # ready and nothing is recording/analyzing).
+        if str(self.ref_btn["state"]) == str(tk.NORMAL):
+            self.play_reference()
+
     def on_length_changed(self, event=None):
         """Regenerate the phrase when the desired length changes."""
         logging.info(f"Phrase length changed to {self.length_var.get()!r}.")
@@ -340,7 +350,10 @@ class PronunciationTrainerGUI(PronunciationTrainerUI):
             # Show the phrase and play the reference for the user to hear
             # (fresh per-playback stop event; see _new_playback_event).
             self.root.after(0, self._show_new_phrase, phrase)
-            self.tts_mgr.play_array(self.reference_audio, KOKORO_SAMPLE_RATE,
+            # Honor the selected reference speed (see play_reference for the
+            # lowered-sample-rate slowing approach) instead of always 1.0×.
+            effective_sr = int(KOKORO_SAMPLE_RATE * self._selected_speed())
+            self.tts_mgr.play_array(self.reference_audio, effective_sr,
                                     self._new_playback_event(), self.shutdown_event)
 
             self.root.after(0, self._phrase_ready)
