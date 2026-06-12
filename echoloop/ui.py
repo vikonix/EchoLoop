@@ -8,6 +8,7 @@ initialised by the controller in ``main.py``. Because it is a mixin, every
 the controller's method at runtime.
 """
 import logging
+import platform
 import tkinter as tk
 from tkinter import ttk
 from tkinter import scrolledtext
@@ -26,6 +27,15 @@ if TYPE_CHECKING:  # only for the _show_feedback annotation; no runtime import
 # mode: LENGTH_FULL → "full" sentence, LENGTH_FEW_WORDS → "fragment".
 LENGTH_FULL = "Full phrase"
 LENGTH_FEW_WORDS = "Few words"
+
+# UI font family, chosen per platform. "Segoe UI" exists only on Windows;
+# without an explicit choice Tk would silently substitute an arbitrary font
+# on other systems, so each platform gets its standard UI face instead.
+_FONT_FAMILIES = {
+    "Windows": "Segoe UI",
+    "Darwin": "Helvetica Neue",   # macOS
+}
+FONT_FAMILY = _FONT_FAMILIES.get(platform.system(), "DejaVu Sans")  # Linux/other
 
 
 class PronunciationTrainerUI:
@@ -64,16 +74,16 @@ class PronunciationTrainerUI:
     def _make_button(self, parent, text, command):
         """Create a consistently styled themed button."""
         return tk.Button(parent, text=text, command=command,
-                         font=("Segoe UI", 10, "bold"),
+                         font=(FONT_FAMILY, 10, "bold"),
                          bg=THEME["bg_accent"], fg=THEME["text_accent"],
                          activebackground=THEME["bg_accent_active"], activeforeground=THEME["text_bright"],
                          bd=0, padx=12, pady=6, cursor="hand2",
                          disabledforeground=THEME["text_disabled"])
 
     def build_ui(self):
-        # 0. Menu bar. On Windows the menu bar is drawn by the OS, so it does
-        # not follow the app's dark theme — that is expected. The handler
-        # (on_open_practice_text) lives in the controller (main.py).
+        # 0. Menu bar (cross-platform tk.Menu). On Windows it is drawn by the
+        # OS, so it does not follow the app's dark theme — that is expected.
+        # The handler (on_open_practice_text) lives in the controller (main.py).
         menubar = tk.Menu(self.root)
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Open practice text…",
@@ -88,10 +98,10 @@ class PronunciationTrainerUI:
         header_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=10)
 
         tk.Label(header_frame, text="ECHOLOOP • Pronunciation",
-                 font=("Segoe UI", 16, "bold"), fg=THEME["accent"], bg=THEME["bg_main"]).pack(side=tk.LEFT)
+                 font=(FONT_FAMILY, 16, "bold"), fg=THEME["accent"], bg=THEME["bg_main"]).pack(side=tk.LEFT)
 
         tk.Label(header_frame, text=config.TARGET_LANGUAGE,
-                 font=("Segoe UI", 9, "bold"), fg=THEME["text_dim"], bg=THEME["bg_panel"],
+                 font=(FONT_FAMILY, 9, "bold"), fg=THEME["text_dim"], bg=THEME["bg_panel"],
                  padx=10, pady=4, bd=0).pack(side=tk.RIGHT)
 
         # 2. Status bar (absolute bottom)
@@ -99,12 +109,12 @@ class PronunciationTrainerUI:
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
         self.status_label = tk.Label(self.status_bar, text="Status: Starting...",
-                                     font=("Segoe UI", 9), fg=THEME["ready"], bg=THEME["bg_panel"])
+                                     font=(FONT_FAMILY, 9), fg=THEME["ready"], bg=THEME["bg_panel"])
         self.status_label.pack(side=tk.LEFT, padx=15, pady=4)
 
         self.stats_label = tk.Label(self.status_bar,
                                     text=f"Last score: -- | Pass ≥ {config.PRONUNCIATION_SCORE_THRESHOLD:.0f}",
-                                    font=("Segoe UI", 9), fg=THEME["text_dim"], bg=THEME["bg_panel"])
+                                    font=(FONT_FAMILY, 9), fg=THEME["text_dim"], bg=THEME["bg_panel"])
         self.stats_label.pack(side=tk.RIGHT, padx=15, pady=4)
 
         # 3. Bottom control panel (mic + instruction + replay buttons)
@@ -119,7 +129,7 @@ class PronunciationTrainerUI:
         self.draw_mic_button("loading")
 
         self.instruction_label = tk.Label(control_frame, text="Loading components...",
-                                          font=("Segoe UI", 10), fg=THEME["text_dim"], bg=THEME["bg_main"])
+                                          font=(FONT_FAMILY, 10), fg=THEME["text_dim"], bg=THEME["bg_main"])
         self.instruction_label.pack(pady=5)
 
         replay_frame = tk.Frame(control_frame, bg=THEME["bg_main"])
@@ -138,16 +148,16 @@ class PronunciationTrainerUI:
         text_header = tk.Frame(source_frame, bg=THEME["bg_main"])
         text_header.pack(fill=tk.X)
         tk.Label(text_header, text="Practice text (edit freely):",
-                 font=("Segoe UI", 9, "bold"), fg=THEME["text_dim"], bg=THEME["bg_main"]).pack(side=tk.LEFT)
+                 font=(FONT_FAMILY, 9, "bold"), fg=THEME["text_dim"], bg=THEME["bg_main"]).pack(side=tk.LEFT)
 
         self.user_name_var = tk.StringVar(value=config.USER_NAME)
         self.user_name_entry = tk.Entry(
             text_header, textvariable=self.user_name_var, width=14,
-            font=("Segoe UI", 9), bg=THEME["bg_accent"], fg=THEME["text_accent"],
+            font=(FONT_FAMILY, 9), bg=THEME["bg_accent"], fg=THEME["text_accent"],
             insertbackground=THEME["text_bright"], bd=0, highlightthickness=1,
             highlightbackground=THEME["border"], highlightcolor=THEME["accent"])
         self.user_name_entry.pack(side=tk.RIGHT)
-        tk.Label(text_header, text="Name:", font=("Segoe UI", 9),
+        tk.Label(text_header, text="Name:", font=(FONT_FAMILY, 9),
                  fg=THEME["text_dim"], bg=THEME["bg_main"]).pack(side=tk.RIGHT, padx=(0, 6))
         # Save on focus loss; Enter just drops focus (which triggers the save
         # and returns the spacebar to push-to-talk duty).
@@ -156,7 +166,7 @@ class PronunciationTrainerUI:
 
         self.source_text = scrolledtext.ScrolledText(
             source_frame, bg=THEME["bg_panel"], fg=THEME["text"], insertbackground=THEME["text_bright"],
-            font=("Segoe UI", 10), wrap=tk.WORD, bd=0, height=6,
+            font=(FONT_FAMILY, 10), wrap=tk.WORD, bd=0, height=6,
             highlightthickness=1, highlightbackground=THEME["border"], highlightcolor=THEME["accent"],
             padx=10, pady=8)
         self.source_text.pack(fill=tk.X, pady=4)
@@ -169,7 +179,7 @@ class PronunciationTrainerUI:
         # Phrase-length selector. "Few words" requests a short fragment instead
         # of a full sentence; changing it regenerates the phrase (see
         # on_length_changed).
-        tk.Label(selectors_frame, text="Phrase length:", font=("Segoe UI", 9),
+        tk.Label(selectors_frame, text="Phrase length:", font=(FONT_FAMILY, 9),
                  fg=THEME["text_dim"], bg=THEME["bg_main"]).pack(side=tk.LEFT, padx=(0, 6))
         self.length_var = tk.StringVar(
             value=LENGTH_FEW_WORDS if config.PHRASE_LENGTH == "fragment" else LENGTH_FULL)
@@ -181,7 +191,7 @@ class PronunciationTrainerUI:
 
         # Voice selector for the reference speech. Changing it regenerates the
         # phrase (see on_voice_changed) so the new voice is heard right away.
-        tk.Label(selectors_frame, text="Voice:", font=("Segoe UI", 9),
+        tk.Label(selectors_frame, text="Voice:", font=(FONT_FAMILY, 9),
                  fg=THEME["text_dim"], bg=THEME["bg_main"]).pack(side=tk.LEFT, padx=(0, 6))
         self.voice_var = tk.StringVar(value=config.KOKORO_VOICE)
         self.voice_selector = ttk.Combobox(
@@ -192,7 +202,7 @@ class PronunciationTrainerUI:
 
         # Lower values slow the reference playback (see play_reference). Stored as
         # the displayed label and parsed back to a float by _selected_speed().
-        tk.Label(selectors_frame, text="Reference speed:", font=("Segoe UI", 9),
+        tk.Label(selectors_frame, text="Reference speed:", font=(FONT_FAMILY, 9),
                  fg=THEME["text_dim"], bg=THEME["bg_main"]).pack(side=tk.LEFT, padx=(0, 6))
         # Options come from config so the persisted value is always one of them.
         self.playback_speed = tk.StringVar(value=f"{config.REFERENCE_SPEED:.1f}×")
@@ -211,7 +221,7 @@ class PronunciationTrainerUI:
         # Small diagnostic button: run the reference through analysis instead
         # of a recording (it should score near 100 against itself).
         self.test_btn = tk.Button(action_frame, text="Test", command=self.on_test_reference,
-                                  font=("Segoe UI", 8), bg=THEME["bg_panel"], fg=THEME["text_muted"],
+                                  font=(FONT_FAMILY, 8), bg=THEME["bg_panel"], fg=THEME["text_muted"],
                                   activebackground=THEME["border"], activeforeground=THEME["info"],
                                   bd=0, padx=8, pady=3, cursor="hand2",
                                   disabledforeground=THEME["text_disabled_dim"])
@@ -230,7 +240,7 @@ class PronunciationTrainerUI:
         phrase_frame = tk.Frame(self.root, bg=THEME["bg_panel"])
         phrase_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=5)
 
-        self.phrase_label = tk.Label(phrase_frame, text="—", font=("Segoe UI", 15, "bold"),
+        self.phrase_label = tk.Label(phrase_frame, text="—", font=(FONT_FAMILY, 15, "bold"),
                                      fg=THEME["info"], bg=THEME["bg_panel"], wraplength=520, justify=tk.LEFT)
         self.phrase_label.pack(anchor=tk.W, padx=12, pady=(10, 10))
 
@@ -240,11 +250,11 @@ class PronunciationTrainerUI:
 
         prosody_header = tk.Frame(prosody_frame, bg=THEME["bg_main"])
         prosody_header.pack(fill=tk.X)
-        tk.Label(prosody_header, text="Prosody", font=("Segoe UI", 9, "bold"),
+        tk.Label(prosody_header, text="Prosody", font=(FONT_FAMILY, 9, "bold"),
                  fg=THEME["accent"], bg=THEME["bg_main"]).pack(side=tk.LEFT)
-        tk.Label(prosody_header, text="● reference", font=("Segoe UI", 8),
+        tk.Label(prosody_header, text="● reference", font=(FONT_FAMILY, 8),
                  fg=THEME["reference"], bg=THEME["bg_main"]).pack(side=tk.RIGHT, padx=(8, 0))
-        tk.Label(prosody_header, text="● you", font=("Segoe UI", 8),
+        tk.Label(prosody_header, text="● you", font=(FONT_FAMILY, 8),
                  fg=THEME["info"], bg=THEME["bg_main"]).pack(side=tk.RIGHT)
 
         # Each chart title doubles as a checkbox: unchecking hides that chart's
@@ -270,7 +280,7 @@ class PronunciationTrainerUI:
         # so the goal is matching the *shape* of the reference, not exact overlap.
         tk.Label(prosody_frame,
                  text="Time runs left→right (stretched to equal width). Aim to match the reference shape.",
-                 font=("Segoe UI", 8), fg=THEME["text_muted"], bg=THEME["bg_main"],
+                 font=(FONT_FAMILY, 8), fg=THEME["text_muted"], bg=THEME["bg_main"],
                  wraplength=540, justify=tk.LEFT).pack(anchor=tk.W, pady=(3, 0))
 
         # fill=X canvases change width on resize, so redraw from the cached prosody.
@@ -287,24 +297,24 @@ class PronunciationTrainerUI:
 
         self.feedback_display = scrolledtext.ScrolledText(
             feedback_frame, bg=THEME["bg_panel"], fg=THEME["text"], insertbackground=THEME["text_bright"],
-            font=("Segoe UI", 11), wrap=tk.WORD, bd=0,
+            font=(FONT_FAMILY, 11), wrap=tk.WORD, bd=0,
             highlightthickness=1, highlightbackground=THEME["border"], highlightcolor=THEME["accent"],
             padx=15, pady=15, spacing2=4, spacing3=8)
         self.feedback_display.pack(fill=tk.BOTH, expand=True)
         self.feedback_display.configure(state=tk.DISABLED)
 
-        self.feedback_display.tag_configure("system", foreground=THEME["text_muted"], font=("Segoe UI", 10, "italic"))
-        self.feedback_display.tag_configure("good", foreground=THEME["good"], font=("Segoe UI", 11, "bold"))
-        self.feedback_display.tag_configure("bad", foreground=THEME["bad"], font=("Segoe UI", 11, "bold"))
-        self.feedback_display.tag_configure("label", foreground=THEME["text_dim"], font=("Segoe UI", 10))
-        self.feedback_display.tag_configure("text", foreground=THEME["text_emph"], font=("Segoe UI", 11))
+        self.feedback_display.tag_configure("system", foreground=THEME["text_muted"], font=(FONT_FAMILY, 10, "italic"))
+        self.feedback_display.tag_configure("good", foreground=THEME["good"], font=(FONT_FAMILY, 11, "bold"))
+        self.feedback_display.tag_configure("bad", foreground=THEME["bad"], font=(FONT_FAMILY, 11, "bold"))
+        self.feedback_display.tag_configure("label", foreground=THEME["text_dim"], font=(FONT_FAMILY, 10))
+        self.feedback_display.tag_configure("text", foreground=THEME["text_emph"], font=(FONT_FAMILY, 11))
         # Monospace tag for phoneme strings so they align and read clearly.
         self.feedback_display.tag_configure("mono", foreground=THEME["text_dim"], font=("Consolas", 10))
         # Amber tag for "no word errors but score still low" guidance.
-        self.feedback_display.tag_configure("warn", foreground=THEME["warn"], font=("Segoe UI", 11))
+        self.feedback_display.tag_configure("warn", foreground=THEME["warn"], font=(FONT_FAMILY, 11))
         # Red tag for error messages (append_error_msg); non-bold so the score
         # line ("bad" tag) still stands out above errors.
-        self.feedback_display.tag_configure("error", foreground=THEME["bad"], font=("Segoe UI", 10))
+        self.feedback_display.tag_configure("error", foreground=THEME["bad"], font=(FONT_FAMILY, 10))
 
     def draw_mic_button(self, state):
         self.btn_canvas.delete("all")
@@ -322,7 +332,7 @@ class PronunciationTrainerUI:
                                     fill="", outline=outline_color, width=3)
         self.btn_canvas.create_oval(cx - r_inner, cy - r_inner, cx + r_inner, cy + r_inner,
                                     fill=bg_color, outline="")
-        self.btn_canvas.create_text(cx, cy, text=emoji, font=("Segoe UI", 20), fill=THEME["text_bright"])
+        self.btn_canvas.create_text(cx, cy, text=emoji, font=(FONT_FAMILY, 20), fill=THEME["text_bright"])
 
     # ------------------------------------------------------------------
     # Feedback / status helpers (always called on the main thread)
@@ -414,7 +424,7 @@ class PronunciationTrainerUI:
         """
         return tk.Checkbutton(parent, text=text, variable=variable,
                               command=self.on_prosody_charts_toggled,
-                              font=("Segoe UI", 8), fg=THEME["text_muted"], bg=THEME["bg_main"],
+                              font=(FONT_FAMILY, 8), fg=THEME["text_muted"], bg=THEME["bg_main"],
                               activebackground=THEME["bg_main"], activeforeground=THEME["text_dim"],
                               selectcolor=THEME["bg_panel"], bd=0, highlightthickness=0,
                               cursor="hand2")
