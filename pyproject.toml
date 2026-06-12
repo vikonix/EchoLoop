@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "echoloop"
+version = "0.1.0"
+description = "Local, offline pronunciation trainer: Kokoro TTS prompts, Wav2Vec2 scoring, local LLM phrase generation."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+# The app is run from the project root (`python main.py`) and is not meant to
+# be installed; this file documents project metadata and the package layout.
+# Runtime dependencies stay in requirements.txt (plus llm_server/ and
+# pronounce/ requirements) because they are installed per-machine with
+# CPU/CUDA variants.
+[tool.setuptools]
+packages = ["echoloop", "pronounce"]

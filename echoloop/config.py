@@ -4,8 +4,11 @@ import sys
 import threading
 from pathlib import Path
 
-# Base directory — always absolute, regardless of working directory at launch.
-BASE_DIR = Path(__file__).parent
+# Project root — always absolute, regardless of working directory at launch.
+# This file lives in echoloop/, so the root is one level up.
+BASE_DIR = Path(__file__).resolve().parent.parent
+# Hand-edited configuration data (settings.json, themes/) lives here.
+CONFIG_DIR = BASE_DIR / "config"
 
 # =====================================================================
 # Settings files (optional overrides)
@@ -46,7 +49,7 @@ if not isinstance(_HW, dict):
 
 # User preferences. Keys starting with "_" are skipped so they can serve as
 # comments (plain JSON has no comment syntax).
-_USER = _read_json(BASE_DIR / "settings.json")
+_USER = _read_json(CONFIG_DIR / "settings.json")
 
 _KNOWN_USER_KEYS = {
     "english_accent",
@@ -335,7 +338,8 @@ PRONUNCIATION_ACOUSTIC_GOOD = 0.20
 # phrases from whatever text the user has in that panel. Read from
 # settings.json ("practice_text_file"); a relative path resolves against the
 # project root.
-PRACTICE_TEXT_FILE = _user_path("practice_text_file", BASE_DIR / "practice_text.txt")
+PRACTICE_TEXT_FILE = _user_path("practice_text_file",
+                                BASE_DIR / "texts" / "practice_text.txt")
 
 # One short phrase is generated per request (non-streaming).
 PHRASE_GEN_TEMPERATURE = 0.7
@@ -416,7 +420,7 @@ if not isinstance(COLOR_THEME, str) or not COLOR_THEME.strip():
 # built-in dark palette so every key is always present.
 THEME = dict(_DARK_THEME)
 
-_THEME_FILE = BASE_DIR / "themes" / f"{COLOR_THEME}_schema.json"
+_THEME_FILE = CONFIG_DIR / "themes" / f"{COLOR_THEME}_schema.json"
 _SCHEMA = _read_json(_THEME_FILE)
 if not _SCHEMA:
     # For "dark" a missing file is fine — the built-in palette IS dark.

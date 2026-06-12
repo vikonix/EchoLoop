@@ -17,14 +17,14 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 warnings.filterwarnings("ignore", message="dropout option adds dropout.*")
 warnings.filterwarnings("ignore", message=".*weight_norm.*deprecated.*")
 
-import config
-# Whisper STT is disabled: stt.py is not imported, so faster-whisper is never
-# loaded and no VRAM/start-up time is spent on it. Transcription is done by
-# Wav2Vec2 in pronounce/. Re-enable by importing STTManager from stt again.
-from llm import LLMManager
-from tts import TTSManager, KOKORO_SAMPLE_RATE, reset_portaudio
+from echoloop import config
+# Whisper STT is disabled: echoloop/stt.py is not imported, so faster-whisper
+# is never loaded and no VRAM/start-up time is spent on it. Transcription is
+# done by Wav2Vec2 in pronounce/. Re-enable by importing STTManager again.
+from echoloop.llm import LLMManager
+from echoloop.tts import TTSManager, KOKORO_SAMPLE_RATE, reset_portaudio
 import pronounce
-from ui import PronunciationTrainerUI, LENGTH_FEW_WORDS
+from echoloop.ui import PronunciationTrainerUI, LENGTH_FEW_WORDS
 
 # Resolved UI color palette (semantic name -> hex), selected by the
 # "color_theme" setting in settings.json; see config.py.

@@ -20,19 +20,19 @@ python main.py
 Also requires the native **espeak-ng** binary on `PATH` (used by `phonemizer`) and a GGUF chat model at `config.EXTERNAL_MODEL_PATH`.
 
 **Default LLM backend**: `local_server` — `llm_server/server.py` is launched automatically as a subprocess.
-**Alternative**: set `LLM_BACKEND = "lm-studio"` in `config.py` and run LM Studio on `http://localhost:1234`.
+**Alternative**: set `"llm_backend": "lm-studio"` in `config/settings.json` and run LM Studio on `http://localhost:1234`.
 
 ## Architecture
 
 - [`main.py`](main.py) — `PronunciationTrainerGUI`: Tkinter GUI, recording, the Prompt→Record→Analyze→Feedback→Loop state machine, threading orchestration, LLM-server subprocess management.
 - [`pronounce/speech.py`](pronounce/speech.py) — pronunciation analysis core. Single entry point `analyze(user_audio, expected_text, reference_audio) -> PronunciationResult`. Wav2Vec2 embeddings + per-step cosine DTW, phoneme/word error rates, prosody. Scoring uses a calibratable acoustic floor (`pronounce/calibration.json` overrides `config.PRONUNCIATION_ACOUSTIC_GOOD`); every attempt's raw components are appended to `logs/pronounce_samples.jsonl`. No GUI/Tkinter dependency.
 - [`pronounce/calibrate.py`](pronounce/calibrate.py) — on-request semi-automatic calibration: fits the acoustic floor from collected samples and writes `pronounce/calibration.json` (`--dry-run` to preview).
-- [`tts.py`](tts.py) — `TTSManager`: Kokoro TTS. `synthesize()` returns the waveform; `play_array(waveform, sample_rate)` plays any waveform. Also exports `reset_portaudio()` (shared PortAudio reset used by recording and playback).
-- [`stt.py`](stt.py) — `STTManager`: faster-whisper STT with VAD. Currently disabled — main.py does not import or load it; the practice loop transcribes via Wav2Vec2-CTC inside `pronounce/`. Kept for possible re-enabling.
-- [`llm.py`](llm.py) — `LLMManager`: OpenAI-compatible client. `generate_phrase()` produces one practice phrase per request (non-streaming).
-- [`config.py`](config.py) — all configuration (device, model names, score threshold, practice-text path, phrase-generation settings, audio settings).
+- [`echoloop/tts.py`](echoloop/tts.py) — `TTSManager`: Kokoro TTS. `synthesize()` returns the waveform; `play_array(waveform, sample_rate)` plays any waveform. Also exports `reset_portaudio()` (shared PortAudio reset used by recording and playback).
+- [`echoloop/stt.py`](echoloop/stt.py) — `STTManager`: faster-whisper STT with VAD. Currently disabled — main.py does not import or load it; the practice loop transcribes via Wav2Vec2-CTC inside `pronounce/`. Kept for possible re-enabling.
+- [`echoloop/llm.py`](echoloop/llm.py) — `LLMManager`: OpenAI-compatible client. `generate_phrase()` produces one practice phrase per request (non-streaming).
+- [`echoloop/config.py`](echoloop/config.py) — all configuration (device, model names, score threshold, practice-text path, phrase-generation settings, audio settings). User overrides live in `config/settings.json`; UI themes in `config/themes/`.
 - [`llm_server/server.py`](llm_server/server.py) — standalone FastAPI server loading GGUF via `llama_cpp`; runs as a separate process to avoid GPU contention.
-- [`practice_text.txt`](practice_text.txt) — default source text loaded into the input panel at startup.
+- [`texts/practice_text.txt`](texts/practice_text.txt) — default source text loaded into the input panel at startup; `texts/` holds additional practice texts.
 
 ## State Machine (pronunciation loop)
 
@@ -46,15 +46,15 @@ Also requires the native **espeak-ng** binary on `PATH` (used by `phonemizer`) a
 
 - **Threading**: Recording, analysis, model loading, phrase generation, and playback run in daemon threads. **Always update the GUI via `root.after()`**; never read/write Tk widgets from a background thread. Source text is read on the main thread and passed into the worker.
 
-- **Reference audio is synthesized once** ([`tts.py`](tts.py) `synthesize()`): the same Kokoro waveform is both played to the user and passed to `analyze()` as the reference. There is no second TTS engine.
+- **Reference audio is synthesized once** ([`echoloop/tts.py`](echoloop/tts.py) `synthesize()`): the same Kokoro waveform is both played to the user and passed to `analyze()` as the reference. There is no second TTS engine.
 
 - **Sample rates**: recording and Whisper use 16 kHz; Kokoro outputs 24 kHz; Wav2Vec2 needs 16 kHz. `pronounce.analyze` takes `user_sr` and `reference_sr` and `_prepare_waveform` resamples to 16 kHz internally. `play_array` plays the reference at 24 kHz and the user recording at 16 kHz.
 
-- **Pronunciation model lifecycle** ([`pronounce/speech.py`](pronounce/speech.py)): models load lazily; `load_models()` makes loading explicit (call in a background thread at startup) and `warm_up()` removes first-call latency — mirroring `stt.py` / `tts.py`. Device follows `config.WAV2VEC2_DEVICE` (defaults to `config.DEVICE`). `speech.py` reads config via `getattr(..., default)` so it stays usable without config edits.
+- **Pronunciation model lifecycle** ([`pronounce/speech.py`](pronounce/speech.py)): models load lazily; `load_models()` makes loading explicit (call in a background thread at startup) and `warm_up()` removes first-call latency — mirroring `echoloop/stt.py` / `echoloop/tts.py`. Device follows `config.WAV2VEC2_DEVICE` (defaults to `config.DEVICE`). `speech.py` reads config via `getattr(..., default)` so it stays usable without config edits.
 
-- **GPU contention**: Wav2Vec2, Kokoro, and `llama_cpp` can compete for VRAM. Mitigations: the LLM runs in a **separate process** (`llm_server/`), and the loop's phases (LLM → Kokoro → Wav2Vec2) run **sequentially**. If VRAM is tight, set `WAV2VEC2_DEVICE = "cpu"` in `config.py`.
+- **GPU contention**: Wav2Vec2, Kokoro, and `llama_cpp` can compete for VRAM. Mitigations: the LLM runs in a **separate process** (`llm_server/`), and the loop's phases (LLM → Kokoro → Wav2Vec2) run **sequentially**. If VRAM is tight, set `WAV2VEC2_DEVICE = "cpu"` in `echoloop/config.py`.
 
-- **Phrase generation** ([`llm.py`](llm.py)): `generate_phrase()` is a single non-streaming completion with its own system prompt (`config.PHRASE_GEN_SYSTEM_PROMPT`); it does **not** touch the conversational `self.messages` history. `recent_phrases` are passed back to avoid repeats; `_clean_phrase` strips quotes/list markers.
+- **Phrase generation** ([`echoloop/llm.py`](echoloop/llm.py)): `generate_phrase()` is a single non-streaming completion with its own system prompt (`config.PHRASE_GEN_SYSTEM_PROMPT`); it does **not** touch the conversational `self.messages` history. `recent_phrases` are passed back to avoid repeats; `_clean_phrase` strips quotes/list markers.
 
 - **Audio normalization** ([`main.py`](main.py)): peaks are normalized before analysis; silence below `AUDIO_MIN_PEAK_THRESHOLD = 0.01` skips gain adjustment.
 
@@ -62,7 +62,7 @@ Also requires the native **espeak-ng** binary on `PATH` (used by `phonemizer`) a
 
 - **LLM server subprocess**: started in `_start_llm_server()`, polled via `LLMManager.check_connection()` until ready; terminated in `quit_app()` with a 5-second kill fallback.
 
-- **Device detection** ([`config.py`](config.py)): CUDA auto-detected via `torch.cuda.is_available()`.
+- **Device detection** ([`echoloop/config.py`](echoloop/config.py)): CUDA auto-detected via `torch.cuda.is_available()`.
 
 - **espeak-ng** is a native binary dependency of `phonemizer` (separate install, not pip) — required for phoneme extraction and word-error analysis.
 

@@ -2,7 +2,7 @@ import re
 import logging
 from typing import List, Optional
 from openai import OpenAI
-import config
+from echoloop import config
 
 # Technical configuration parameters
 LLM_TIMEOUT = 30.0

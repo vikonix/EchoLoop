@@ -13,7 +13,7 @@ from tkinter import ttk
 from tkinter import scrolledtext
 from typing import TYPE_CHECKING
 
-import config
+from echoloop import config
 
 # Resolved UI color palette (semantic name -> hex), selected by the
 # "color_theme" setting in settings.json; see config.py.

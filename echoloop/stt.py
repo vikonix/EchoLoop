@@ -1,6 +1,6 @@
 import numpy as np
 from faster_whisper import WhisperModel
-import config
+from echoloop import config
 
 
 COMPUTE_TYPE = "float16" if config.DEVICE == "cuda" else "int8"

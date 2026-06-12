@@ -43,11 +43,11 @@ from transformers import Wav2Vec2Processor, Wav2Vec2Model, Wav2Vec2ForCTC
 from phonemizer import phonemize
 
 # Allow autonomous use (e.g. running the test directly from inside pronounce/):
-# make the project root importable so ``import config`` resolves.
+# make the project root importable so the echoloop package resolves.
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
-import config
+from echoloop import config
 
 
 # =====================================================================

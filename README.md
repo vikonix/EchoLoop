@@ -39,12 +39,13 @@ You can replay the **reference** and **your own recording** back-to-back to hear
 | `main.py` | `PronunciationTrainerGUI` — Tkinter GUI, recording, the Prompt→Record→Analyze→Feedback→Loop state machine, threading orchestration, LLM-server subprocess management. |
 | `pronounce/speech.py` | Pronunciation analysis core (adapted from OpenPronounce). Single entry point `analyze(...)`; Wav2Vec2 embeddings + DTW, phoneme comparison, prosody, scoring. No GUI dependency. |
 | `pronounce/calibrate.py` | On-request scoring calibration: reads the per-attempt samples from `logs/pronounce_samples.jsonl` and writes the acoustic floor to `pronounce/calibration.json`. |
-| `tts.py` | `TTSManager` — Kokoro TTS. `synthesize()` returns the waveform; `play_array()` plays any waveform (reference at 24 kHz, your recording at 16 kHz). |
-| `stt.py` | `STTManager` — faster-whisper speech-to-text (loaded at startup; kept available for future use). |
-| `llm.py` | `LLMManager` — OpenAI-compatible client. `generate_phrase()` produces one practice phrase per request. |
-| `config.py` | All configuration: device, model names, score threshold, practice-text path, phrase-generation settings, audio settings. |
+| `echoloop/tts.py` | `TTSManager` — Kokoro TTS. `synthesize()` returns the waveform; `play_array()` plays any waveform (reference at 24 kHz, your recording at 16 kHz). |
+| `echoloop/stt.py` | `STTManager` — faster-whisper speech-to-text (loaded at startup; kept available for future use). |
+| `echoloop/llm.py` | `LLMManager` — OpenAI-compatible client. `generate_phrase()` produces one practice phrase per request. |
+| `echoloop/config.py` | All configuration: device, model names, score threshold, practice-text path, phrase-generation settings, audio settings. |
 | `llm_server/server.py` | Standalone FastAPI server loading GGUF models via `llama_cpp`; runs as a separate process to avoid CUDA contention. See [`llm_server/README.md`](llm_server/README.md). |
-| `practice_text.txt` | Default source text shown in the input panel at startup. |
+| `config/` | User configuration data: `settings.json` (hand-edited preferences) and `themes/` (UI color schemes). |
+| `texts/practice_text.txt` | Default source text shown in the input panel at startup; put your own practice texts in `texts/`. |
 
 ---
 
@@ -109,7 +110,7 @@ The default `torch` and `llama-cpp-python` wheels are CPU-only. For NVIDIA GPUs:
 
 ### Get a GGUF model
 
-Download a small instruct model (e.g. `Llama-3.2-3B-Instruct-Q4_K_M.gguf`) and place it at the path set by `EXTERNAL_MODEL_PATH` in `config.py` (default: `models/llama-3.2-3b-instruct-q4_k_m.gguf`).
+Download a small instruct model (e.g. `Llama-3.2-3B-Instruct-Q4_K_M.gguf`) and place it at the path set by `EXTERNAL_MODEL_PATH` in `echoloop/config.py` (default: `models/llama-3.2-3b-instruct-q4_k_m.gguf`).
 
 ---
 
@@ -133,14 +134,14 @@ Press `ESC` or close the window to quit (the LLM server subprocess is terminated
 
 ## Configuration
 
-Key options in [`config.py`](config.py):
+Key options in [`echoloop/config.py`](echoloop/config.py) (overridable via [`config/settings.json`](config/settings.json)):
 
 | Setting | Default | Description |
 |---|---|---|
 | `WAV2VEC2_MODEL_NAME` | `facebook/wav2vec2-large-960h` | Pronunciation/transcription model. |
 | `WAV2VEC2_DEVICE` | `DEVICE` (cuda/cpu) | Set to `"cpu"` to avoid VRAM contention with llama_cpp / Kokoro. |
 | `PRONUNCIATION_SCORE_THRESHOLD` | `70.0` | Score (0–100) required to pass a phrase. |
-| `PRACTICE_TEXT_FILE` | `practice_text.txt` | Source text pre-loaded into the input panel. |
+| `PRACTICE_TEXT_FILE` | `texts/practice_text.txt` | Source text pre-loaded into the input panel. |
 | `PHRASE_GEN_TEMPERATURE` / `PHRASE_GEN_MAX_TOKENS` | `0.7` / `40` | Phrase-generation sampling. |
 | `PHRASE_GEN_RECENT_MEMORY` | `5` | How many recent phrases are sent back to the model to avoid repeats. |
 | `LLM_BACKEND` | `local_server` | `local_server` (auto-started subprocess) or `lm-studio`. |
@@ -189,7 +190,7 @@ python pronounce/test_speech.py path/to/user.wav [path/to/reference.wav]
 Three torch models (Wav2Vec2, Kokoro) plus `llama_cpp` can compete for VRAM on a single GPU. EchoLoop mitigates this two ways:
 
 - The LLM runs in a **separate process** (`llm_server/`), and the practice loop runs its phases (LLM → Kokoro → Wav2Vec2) **sequentially**, so they don't synthesize/infer at the same time.
-- If VRAM is still tight, set `WAV2VEC2_DEVICE = "cpu"` in `config.py` — short phrases analyze acceptably on CPU.
+- If VRAM is still tight, set `WAV2VEC2_DEVICE = "cpu"` in `echoloop/config.py` — short phrases analyze acceptably on CPU.
 
 ---
 

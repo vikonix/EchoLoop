@@ -5,7 +5,7 @@ from typing import Optional
 import numpy as np
 import sounddevice as sd
 from kokoro import KModel, KPipeline
-import config
+from echoloop import config
 import io
 import wave
 
