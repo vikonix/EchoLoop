@@ -57,18 +57,61 @@ You can replay the **reference** and **your own recording** back-to-back to hear
 - For GPU acceleration: an NVIDIA GPU with a CUDA-enabled PyTorch build.
 - **espeak-ng** (native binary, required by the phonemizer) — installed separately, see below.
 
-### Models (downloaded automatically on first run, except the GGUF)
+### Models
+
+`install.py` pre-downloads all of these (see [Quick install](#quick-install-script)).
+Otherwise the three Hugging Face models are fetched automatically on first run,
+and only the GGUF chat model must be obtained manually.
 
 | Model | Used by | Notes |
 |---|---|---|
-| `facebook/wav2vec2-large-960h` | pronunciation analysis | ~1.2 GB, downloaded on first run |
-| Kokoro-82M (`hexgrad/Kokoro-82M`) | text-to-speech | downloaded on first run |
-| faster-whisper `small` | speech-to-text | downloaded on first run |
-| A GGUF chat model (e.g. `Llama-3.2-3B-Instruct-Q4_K_M`) | phrase generation | **download manually** into `models/` |
+| `facebook/wav2vec2-large-960h` | pronunciation analysis | ~1.2 GB; via `install.py` or on first run |
+| Kokoro-82M (`hexgrad/Kokoro-82M`) | text-to-speech | via `install.py` or on first run |
+| faster-whisper `small` | speech-to-text | via `install.py` or on first run |
+| A GGUF chat model (e.g. `Llama-3.2-3B-Instruct-Q4_K_M`) | phrase generation | via `install.py`, or **download manually** into `models/` |
 
 ---
 
 ## Installation
+
+### Quick install (script)
+
+`install.py` automates the whole setup: it installs the Python dependencies,
+auto-detects an NVIDIA GPU and installs the matching CUDA builds of `torch` and
+`llama-cpp-python`, checks for `espeak-ng`, pre-downloads the Hugging Face models
+into `model_cache/`, and downloads the GGUF chat model into `models/`.
+
+```bash
+git clone <your-repo-url> EchoLoop
+cd EchoLoop
+
+# Create and activate a virtual environment, then run the installer INSIDE it
+# (the script installs into whatever interpreter runs it):
+python -m venv .venv
+.venv\Scripts\activate            # Windows
+# source .venv/bin/activate       # macOS / Linux
+
+python install.py
+```
+
+The installer prints each step and the exact command, then asks before running
+it (answer `Y` to run, `n` to abort, `s` to skip). Anything already installed is
+detected and offered as reinstall-or-skip rather than blindly redone. The full
+run is logged to `logs/install.log`.
+
+Useful flags:
+
+- `--yes` — run non-interactively (skips already-installed steps; add `--reinstall` to force them)
+- `--dry-run` — print the steps and commands without executing anything
+- `--cpu` — skip the GPU (CUDA) installs
+- `--skip-models` / `--skip-gguf` — skip the model / GGUF downloads
+
+`espeak-ng` (a native binary, see below) is checked but not installed on Windows —
+follow the printed instructions if it is missing. On Windows, enabling
+**Developer Mode** lets the model cache use symlinks; without it the installer
+falls back to copying files (more disk use, but it always works).
+
+### Manual installation
 
 ```bash
 # 1. Clone
@@ -110,7 +153,8 @@ The default `torch` and `llama-cpp-python` wheels are CPU-only. For NVIDIA GPUs:
 
 ### Get a GGUF model
 
-Download a small instruct model (e.g. `Llama-3.2-3B-Instruct-Q4_K_M.gguf`) and place it at the path set by `EXTERNAL_MODEL_PATH` in `echoloop/config.py` (default: `models/llama-3.2-3b-instruct-q4_k_m.gguf`).
+`install.py` already downloads `llama-3.2-3b-instruct-q4_k_m.gguf` into `models/`.
+To do it manually instead, download a small instruct model (e.g. `Llama-3.2-3B-Instruct-Q4_K_M.gguf`) and place it at the path set by `EXTERNAL_MODEL_PATH` in `echoloop/config.py` (default: `models/llama-3.2-3b-instruct-q4_k_m.gguf`).
 
 ---
 
