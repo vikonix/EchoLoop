@@ -111,6 +111,47 @@ class TestPureLogic(unittest.TestCase):
         self.assertTrue(hasattr(result, "prosody"))
         self.assertTrue(hasattr(result, "transcription"))
 
+    # --- word_level_diff: target-vs-ASR alignment --------------------------
+    def test_word_diff_empty_on_exact_match(self):
+        # Case/punctuation are normalised away, so this counts as a clean match.
+        self.assertEqual(
+            speech.word_level_diff("i like the time", "I like the time."), [])
+
+    def test_word_diff_reports_substitution(self):
+        self.assertEqual(
+            speech.word_level_diff("i like the times", "i like the time"),
+            [{"expected": "time", "heard": "times"}])
+
+    def test_word_diff_reports_deletion(self):
+        # The target word "the" is dropped from the attempt -> heard side empty.
+        self.assertEqual(
+            speech.word_level_diff("i like time", "i like the time"),
+            [{"expected": "the", "heard": ""}])
+
+    def test_word_diff_reports_insertion(self):
+        # An extra recognised word -> expected side empty.
+        self.assertEqual(
+            speech.word_level_diff("i like the time", "i like time"),
+            [{"expected": "", "heard": "the"}])
+
+    # --- heard_word_tags: per-word correctness for the ASR line ------------
+    def test_heard_word_tags_marks_matches_and_mismatches(self):
+        # "hullo" is wrong; the rest match the target word for word.
+        tags = speech.heard_word_tags(
+            "hullo i am at a train station", "hello i am at a train station")
+        self.assertEqual([t["word"] for t in tags],
+                         ["hullo", "i", "am", "at", "a", "train", "station"])
+        self.assertEqual([t["correct"] for t in tags],
+                         [False, True, True, True, True, True, True])
+
+    def test_heard_word_tags_all_correct_on_exact_match(self):
+        tags = speech.heard_word_tags("i am here", "I am here.")
+        self.assertTrue(all(t["correct"] for t in tags))
+
+
+# Note: the prosody-visualisation helpers (to_semitones, resample_series) moved
+# to echoloop/prosody_utils.py; their tests live in echoloop/test_prosody_utils.py.
+
 
 def _run_end_to_end(user_path: str, reference_path: Optional[str]) -> None:
     """Run the full analyze() pipeline on real WAV files (loads the model)."""

@@ -14,7 +14,7 @@ from tkinter import ttk
 from tkinter import scrolledtext
 from typing import TYPE_CHECKING
 
-from echoloop import config
+from echoloop import config, prosody_utils
 
 # Resolved UI color palette (semantic name -> hex), selected by the
 # "color_theme" setting in settings.json; see config.py.
@@ -262,7 +262,7 @@ class PronunciationTrainerUI:
         # (see _toggle_prosody_charts). Initial state is the persisted setting.
         self.show_f0 = tk.BooleanVar(value=config.SHOW_PITCH_CHART)
         self.f0_check = self._make_chart_checkbox(
-            prosody_frame, "Pitch (F0) — intonation, low ↔ high", self.show_f0)
+            prosody_frame, "Pitch — intonation (semitones vs your median)", self.show_f0)
         self.f0_check.pack(anchor=tk.W)
         self.f0_canvas = tk.Canvas(prosody_frame, height=46, bg=THEME["bg_panel"],
                                    highlightthickness=1, highlightbackground=THEME["border"])
@@ -372,19 +372,6 @@ class PronunciationTrainerUI:
     # ------------------------------------------------------------------
     # Prosody drawing
     # ------------------------------------------------------------------
-    @staticmethod
-    def _resample_series(values, target: int = 160):
-        """Evenly resample a 1-D sequence down to ``target`` points for plotting.
-
-        Prosody contours can be hundreds of frames long; thinning keeps the
-        sparkline light without changing its shape.
-        """
-        n = len(values)
-        if n <= target:
-            return list(values)
-        step = (n - 1) / (target - 1)
-        return [values[int(round(i * step))] for i in range(target)]
-
     def _draw_prosody(self, canvas, series):
         """Draw contours onto ``canvas``. ``series`` is a list of (values, color).
 
@@ -406,7 +393,7 @@ class PronunciationTrainerUI:
         span = (hi - lo) or 1.0
 
         for values, color in series:
-            points = self._resample_series(values)
+            points = prosody_utils.resample_series(values)
             if len(points) < 2:
                 continue
             coords = []
@@ -449,9 +436,13 @@ class PronunciationTrainerUI:
         prosody = self._last_prosody
         if not prosody:
             return
+        # Normalize each pitch contour to semitones vs its own median so the
+        # reference and the user (different vocal registers) become directly
+        # comparable in shape; _draw_prosody's shared scale then centres both
+        # on 0 ST. Energy is already per-utterance scaled, so it is left as-is.
         self._draw_prosody(self.f0_canvas, [
-            (prosody.get("ref_f0", []), THEME["reference"]),   # reference
-            (prosody.get("f0", []), THEME["info"]),        # you
+            (prosody_utils.to_semitones(prosody.get("ref_f0", [])), THEME["reference"]),  # reference
+            (prosody_utils.to_semitones(prosody.get("f0", [])), THEME["info"]),           # you
         ])
         self._draw_prosody(self.en_canvas, [
             (prosody.get("ref_energy", []), THEME["reference"]),
@@ -474,15 +465,19 @@ class PronunciationTrainerUI:
             self.feedback_display.insert(tk.END, token + " ", "bad" if is_error else "text")
         self.feedback_display.insert(tk.END, "\n")
 
-        # Second line: what the recognizer actually heard.
+        # What the recognizer heard, word by word: correctly-heard words in
+        # green so the user can see at a glance which words landed.
         self.feedback_display.insert(tk.END, "Heard: ", "label")
-        self.feedback_display.insert(tk.END, f"{result.transcription or '—'}\n", "text")
-
-        # When the words are right but the score still failed, the gap is prosodic.
-        if not result.word_errors and not result.passed:
-            self.feedback_display.insert(
-                tk.END, "Words are correct, but your rhythm/intonation differ from the "
-                "reference — match the curves above.\n", "warn")
+        if not result.word_diff:
+            self.feedback_display.insert(tk.END, "matches the target ✓\n", "good")
+        elif result.heard_words:
+            for entry in result.heard_words:
+                # Correct words green, misheard words red.
+                tag = "good" if entry.get("correct") else "bad"
+                self.feedback_display.insert(tk.END, entry["word"] + " ", tag)
+            self.feedback_display.insert(tk.END, "\n")
+        else:
+            self.feedback_display.insert(tk.END, f"{result.transcription or '—'}\n", "text")
 
         self.feedback_display.insert(tk.END, "\n")
         self.feedback_display.configure(state=tk.DISABLED)

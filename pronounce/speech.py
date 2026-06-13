@@ -160,6 +160,13 @@ class PronunciationResult:
     words_with_errors: List[str] = field(default_factory=list)
     expected_phonemes: List[str] = field(default_factory=list)
     transcribed_phonemes: List[str] = field(default_factory=list)
+    # Word-level alignment of the recognised speech against the target phrase:
+    # one {"expected", "heard"} pair per diverging segment (empty = exact match).
+    # Lets the GUI show concrete mismatches instead of the raw ASR string.
+    word_diff: List[Dict[str, str]] = field(default_factory=list)
+    # Every recognised word in order, each tagged {"word", "correct"} by whether
+    # it matched the target. Lets the GUI colour correct words on the ASR line.
+    heard_words: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # =====================================================================
@@ -450,6 +457,58 @@ def compare_transcriptions(transcription: str, text_reference: str) -> Dict[str,
     }
 
 
+def word_level_diff(transcription: str, text_reference: str) -> List[Dict[str, str]]:
+    """Align recognised words against the target phrase, returning only mismatches.
+
+    Lets the GUI present concrete "expected -> heard" pairs instead of the raw
+    ASR string. Both sides are cleaned identically (lower-case, punctuation
+    stripped) and split on whitespace, then aligned with a word-token edit
+    distance via ``Levenshtein.opcodes`` (the same primitive the phoneme
+    comparison uses, which accepts token lists):
+
+        * substitution -> {"expected": "time", "heard": "times"}
+        * deletion     -> {"expected": "the",  "heard": ""}      (word dropped)
+        * insertion    -> {"expected": "",      "heard": "uh"}    (extra word)
+
+    'equal' segments are skipped, so an empty list means the recognition
+    matched the target word for word.
+    """
+    expected_words = clean_transcription(text_reference).split()
+    heard_words = clean_transcription(transcription).split()
+
+    diffs: List[Dict[str, str]] = []
+    for tag, i1, i2, j1, j2 in Levenshtein.opcodes(expected_words, heard_words):
+        if tag == "equal":
+            continue
+        diffs.append({
+            "expected": " ".join(expected_words[i1:i2]),
+            "heard": " ".join(heard_words[j1:j2]),
+        })
+    return diffs
+
+
+def heard_word_tags(transcription: str, text_reference: str) -> List[Dict[str, Any]]:
+    """Tag each recognised word by whether it matched the target phrase.
+
+    Returns one entry per heard word, in spoken order::
+
+        [{"word": "hullo", "correct": False}, {"word": "i", "correct": True}, ...]
+
+    A word is ``correct`` when it falls in an 'equal' segment of the same
+    word-token alignment used by :func:`word_level_diff`. Lets the GUI colour
+    correctly-recognised words on the raw ASR line.
+    """
+    expected_words = clean_transcription(text_reference).split()
+    heard_words = clean_transcription(transcription).split()
+
+    tags = [{"word": w, "correct": False} for w in heard_words]
+    for tag, _i1, _i2, j1, j2 in Levenshtein.opcodes(expected_words, heard_words):
+        if tag == "equal":
+            for j in range(j1, j2):
+                tags[j]["correct"] = True
+    return tags
+
+
 def _random_pair_baseline(emb_a: np.ndarray, emb_b: np.ndarray,
                           n_pairs: int = 2000, seed: int = 0) -> float:
     """Mean cosine distance between randomly paired frames of two embeddings.
@@ -705,4 +764,6 @@ def analyze(user_audio: np.ndarray,
         words_with_errors=differences["words_with_errors"],
         expected_phonemes=differences["expected_phonemes"],
         transcribed_phonemes=differences["transcribed_phonemes"],
+        word_diff=word_level_diff(transcription, expected_text),
+        heard_words=heard_word_tags(transcription, expected_text),
     )
